@@ -125,11 +125,20 @@ if (( QBT_CONFIG )); then
     say "Enabling qBittorrent WebUI on 127.0.0.1:$QBT_WEBUI_PORT (localhost auth bypass)"
     runuser -u "$RUN_USER" -- cp -p "$QCONF" "$QCONF.bak.$(date +%s)"
     runuser -u "$RUN_USER" -- python3 -I - "$QCONF" "$QBT_WEBUI_PORT" <<'PY'
-import sys
+import base64, hashlib, os, sys
 path, port = sys.argv[1], sys.argv[2]
 want = {"WebUI\\Enabled": "true", "WebUI\\Address": "127.0.0.1", "WebUI\\Port": port,
         "WebUI\\LocalHostAuth": "false", "WebUI\\UseUPnP": "false"}
 lines = open(path).read().splitlines()
+# qBittorrent 5 won't start the WebUI without credentials. Localhost auth is
+# bypassed, so nothing needs the password: set a random one (stored only as
+# qBittorrent's PBKDF2 hash) unless credentials already exist.
+if not any(l.startswith("WebUI\\Password_PBKDF2=") for l in lines):
+    salt = os.urandom(16)
+    digest = hashlib.pbkdf2_hmac("sha512", base64.b64encode(os.urandom(24)), salt, 100000, 64)
+    want["WebUI\\Password_PBKDF2"] = '"@ByteArray(%s:%s)"' % (base64.b64encode(salt).decode(), base64.b64encode(digest).decode())
+    if not any(l.startswith("WebUI\\Username=") for l in lines):
+        want["WebUI\\Username"] = "admin"
 out, in_prefs, seen_prefs, done = [], False, False, set()
 def flush():
     for k, v in want.items():
