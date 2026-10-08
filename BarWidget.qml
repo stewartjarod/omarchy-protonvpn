@@ -81,11 +81,12 @@ BarWidget {
     bar: root.bar
     iconComponent: Component {
       Item {
-        ProtonIcon {
+        VpnIcon {
           anchors.centerIn: parent
           iconSize: Style.bar.iconCanvas
-          color: root.vpnConnected ? button.foreground : Qt.darker(button.foreground, 1.55)
-          crossed: !root.vpnConnected
+          color: button.foreground
+          connected: root.vpnConnected
+          connecting: vpn.connecting
           warning: root.vpnWarning
           badgeColor: root.bar ? root.bar.urgent : Color.urgent
         }

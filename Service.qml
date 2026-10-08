@@ -36,6 +36,9 @@ Item {
   signal filterChanged()
   property bool refreshing: false
   property bool toggling: false
+  // True from a connect request until the CLI returns; drives the bar's
+  // "acquiring" icon.
+  property bool connecting: false
 
   readonly property int refreshIntervalSec: intSetting("refreshIntervalSec", 30, 5, 3600)
   readonly property bool notificationsEnabled: boolSetting("notificationsEnabled", true)
@@ -121,16 +124,19 @@ Item {
     serverRows = rows
   }
 
+  function searchRows(query) { return Model.searchRows(_parsedList, serverFilter, query, serverRows[serverFilter] || [], _countryNames, 40) }
+  function describeFavorite(fav) { return Model.describeFavorite(_parsedList, fav, _countryNames) }
   function cityRows(country) { return Model.cityRows(_parsedList, serverFilter, country) }
   function serverRowsIn(country, city) { return Model.serverRowsIn(_parsedList, serverFilter, country, city) }
 
   // Connects to the fastest server matching the active type filter, narrowed
   // by country and/or city, using the CLI's feature flags where they exist
   // (--p2p / --securecore / --tor). `name` connects to one specific server.
-  function connectServer(code, city, name) {
+  function connectServer(code, city, name, filterKey) {
     if (toggling) return
+    var filter = filterKey || serverFilter
     var args = ["protonvpn", "connect"]
-    var flag = Model.filterFlag(serverFilter)
+    var flag = Model.filterFlag(filter)
     if (name) {
       args.push(String(name))
     } else {
@@ -139,8 +145,9 @@ Item {
       else if (code) args.push("--country", String(code))
     }
     toggling = true
+    connecting = true
     lastError = ""
-    actionStatus = "Connecting to " + (name ? name : "fastest " + (flag !== "" ? serverFilter + " " : "") + "server" + (city ? " in " + city : (code ? " in " + code : ""))) + "\u2026"
+    actionStatus = "Connecting to " + (name ? name : "fastest " + (flag !== "" ? filter + " " : "") + "server" + (city ? " in " + city : (code ? " in " + code : ""))) + "\u2026"
     toggleProcess.command = args
     toggleProcess.running = true
   }
@@ -171,6 +178,7 @@ Item {
     // Once the real state matches the optimistic value, drop back to tracking
     // reality so the knob always reflects the true connection.
     if (_desiredConnected !== -1 && connected === (_desiredConnected === 1)) _desiredConnected = -1
+    if (connecting && !toggling) connecting = false
     serverName = parsed.serverName
     serverCity = parsed.serverCity
     serverCountry = parsed.serverCountry
@@ -241,6 +249,7 @@ Item {
   function connect() {
     if (toggling || connected) return
     toggling = true
+    connecting = true
     lastError = ""
     _desiredConnected = 1
     actionStatus = "Connecting to fastest server\u2026"
@@ -322,6 +331,7 @@ Item {
       if (toggleProcess.running) toggleProcess.running = false
       root.refreshing = false
       root.toggling = false
+      root.connecting = false
     }
   }
 
@@ -366,6 +376,7 @@ Item {
         root.backendState = "Unavailable"
         root.statusText = "CLI status failed"
         root.lastError = Model.elideStatus(stderr || stdout || "Could not read Proton VPN status")
+        if (!root.toggling) root.connecting = false
         if (root._stateKnown && wasConnected) {
           root.notify("Proton VPN connection lost", root.lastError, true)
         }
@@ -409,6 +420,9 @@ Item {
     stderr: StdioCollector { id: toggleStderr; waitForEnd: true; onStreamFinished: root._toggleError = text }
     onExited: function(exitCode) {
       root.toggling = false
+      // On success keep the acquiring icon until a status poll confirms the
+      // tunnel (applyStatus clears it); on failure drop it now.
+      if (exitCode !== 0) root.connecting = false
       var stdout = String(toggleStdout.text || root._toggleOutput || "")
       var stderr = String(toggleStderr.text || root._toggleError || "")
       if (exitCode === 0) {

@@ -6,7 +6,9 @@ Status and one-click fastest-server connection for Proton VPN in the menu bar.
 
 ## Features
 
-- Bar icon: theme-colored Proton VPN mark with connected/disconnected state.
+- Bar icon: Adwaita's VPN symbol in the theme color, faded when disconnected,
+  full strength when connected, and the "acquiring" variant with pulsing
+  dots while a connection is being set up.
 - Details panel with:
   - Connected server and location
   - Server load and protocol
@@ -16,6 +18,14 @@ Status and one-click fastest-server connection for Proton VPN in the menu bar.
   - Collapsible server list with a type filter (click the header or press `s`;
     press `f` or click the "Type" row to cycle): All, Free, Plus, P2P,
     Streaming, Secure Core, Tor. Types your plan can't use are hidden.
+  - Search box at the top of the list (`/` to focus): matches countries,
+    cities and server names (e.g. `japan`, `zurich`, `nl#38`) within the
+    selected type. `Esc` returns to the list with the query kept, so `j`/`k`,
+    `b` and `enter` work on the results.
+  - Favorites: star any country, city or server (click the star or press `b`)
+    and it shows in a FAVORITES section at the top. Country and city
+    favorites remember their type, e.g. P2P in the Netherlands. Saved in the
+    widget's entry in `~/.config/omarchy/shell.json`.
   - Click a country to expand its cities, and a city to expand its servers
     (lowest load first). Each level has a "Fastest in ..." row, and picking a
     server connects to that exact one. P2P, Secure Core and Tor also get a
@@ -27,7 +37,7 @@ Status and one-click fastest-server connection for Proton VPN in the menu bar.
   instantly (optimistically) and reconciles with the real VPN state.
 - Right click connects to the fastest eligible Proton server or disconnects.
 - Middle click refreshes status.
-- Keyboard navigation: `j`/`k`, `enter`, `t`, `c`, `s`, `f`, `r`, and `esc`.
+- Keyboard navigation: `j`/`k`, `enter`, `t`, `c`, `s`, `f`, `b`, `/`, `r`, and `esc`.
 
 ## Backend
 

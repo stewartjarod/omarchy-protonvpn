@@ -191,7 +191,7 @@ function cityRows(parsed, filterKey, country) {
   var rows = []
   for (var n in byCity) {
     var r = byCity[n]
-    r.hint = r.count + " server" + (r.count === 1 ? "" : "s") + " \u00b7 " + r.bestLoad + "% best load"
+    r.hint = r.count + " server" + (r.count === 1 ? "" : "s") + " \u00b7 " + r.bestLoad + "% load"
     rows.push(r)
   }
   rows.sort(function(a, b) { return a.name.localeCompare(b.name) })
@@ -207,15 +207,104 @@ function serverRowsIn(parsed, filterKey, country, city) {
     var s = parsed.logicals[i]
     if (!s || Number(s.Status) !== 1 || String(s.ExitCountry || "").toUpperCase() !== country || !pred(s)) continue
     if (stripMarkup(s.City || "Other") !== city) continue
-    var feats = []
-    if (hasFeature(s, FEATURE_P2P)) feats.push("P2P")
-    if (hasFeature(s, FEATURE_STREAMING)) feats.push("Streaming")
-    if (hasFeature(s, FEATURE_SECURE_CORE)) feats.push("Secure Core")
-    if (hasFeature(s, FEATURE_TOR)) feats.push("Tor")
+    var feats = featureLabels(s)
     rows.push({ name: stripMarkup(s.Name), load: Number(s.Load), hint: s.Load + "%" + (feats.length ? " \u00b7 " + feats.join(", ") : "") })
   }
   rows.sort(function(a, b) { return a.load - b.load })
   return rows
+}
+
+function featureLabels(server) {
+  var feats = []
+  if (hasFeature(server, FEATURE_P2P)) feats.push("P2P")
+  if (hasFeature(server, FEATURE_STREAMING)) feats.push("Streaming")
+  if (hasFeature(server, FEATURE_SECURE_CORE)) feats.push("Secure Core")
+  if (hasFeature(server, FEATURE_TOR)) feats.push("Tor")
+  return feats
+}
+
+function filterLabel(key) {
+  for (var i = 0; i < SERVER_FILTERS.length; i++) if (SERVER_FILTERS[i].key === key) return SERVER_FILTERS[i].label
+  return ""
+}
+
+function _norm(text) {
+  return String(text || "").toLowerCase().replace(/\s+/g, " ").trim()
+}
+
+// Free-text search across country names/codes, city names and server names
+// (e.g. "nl#12", "zurich", "japan") for the active filter. Returns up to
+// `limit` matches per kind; countries reuse the filter's country rows.
+function searchRows(parsed, filterKey, query, countries, countryNames, limit) {
+  var out = { countries: [], cities: [], servers: [] }
+  var q = _norm(query)
+  if (!parsed || q === "") return out
+  var max = limit || 40
+  for (var i = 0; i < (countries || []).length && out.countries.length < max; i++) {
+    var c = countries[i]
+    if (_norm(c.name).indexOf(q) !== -1 || _norm(c.code) === q) out.countries.push(c)
+  }
+  var pred = filterPredicate(filterKey, parsed.maxTier)
+  var cities = {}
+  for (var j = 0; j < parsed.logicals.length; j++) {
+    var s = parsed.logicals[j]
+    if (!s || Number(s.Status) !== 1 || !pred(s)) continue
+    var code = String(s.ExitCountry || "").toUpperCase()
+    var city = stripMarkup(s.City || "")
+    var load = Number(s.Load)
+    if (city && _norm(city).indexOf(q) !== -1) {
+      var key = code + "|" + city
+      if (!cities[key]) cities[key] = { country: code, name: city, countryName: (countryNames && countryNames[code]) ? stripMarkup(countryNames[code]) : code, count: 0, bestLoad: load }
+      cities[key].count += 1
+      if (isFinite(load) && load < cities[key].bestLoad) cities[key].bestLoad = load
+    }
+    if (out.servers.length < max && _norm(s.Name).indexOf(q) !== -1) {
+      var feats = featureLabels(s)
+      out.servers.push({ name: stripMarkup(s.Name), country: code, city: city || "Other", load: load, hint: s.Load + "%" + (feats.length ? " \u00b7 " + feats.join(", ") : "") })
+    }
+  }
+  for (var k in cities) {
+    if (out.cities.length >= max) break
+    var r = cities[k]
+    r.hint = r.count + " server" + (r.count === 1 ? "" : "s") + " \u00b7 " + r.bestLoad + "% load"
+    out.cities.push(r)
+  }
+  out.cities.sort(function(a, b) { return a.name.localeCompare(b.name) })
+  out.servers.sort(function(a, b) { return a.load - b.load })
+  return out
+}
+
+// Favorites are { kind: "country" | "city" | "server", country, city, name,
+// filter }. Country/city favorites remember the type filter they were saved
+// under ("P2P in Netherlands"); servers are specific already.
+function favoriteKey(fav) {
+  if (!fav) return ""
+  if (fav.kind === "server") return "server:" + fav.name
+  if (fav.kind === "city") return "city:" + fav.country + ":" + fav.city + ":" + (fav.filter || "all")
+  return "country:" + fav.country + ":" + (fav.filter || "all")
+}
+
+// Label + live hint (current load) for a favorite row.
+function describeFavorite(parsed, fav, countryNames) {
+  var countryName = countryNames && countryNames[fav.country] ? stripMarkup(countryNames[fav.country]) : (fav.country || "")
+  var typeSuffix = fav.filter && fav.filter !== "all" ? filterLabel(fav.filter) + " \u00b7 " : ""
+  if (fav.kind === "server") {
+    var hint = ""
+    if (parsed) {
+      for (var i = 0; i < parsed.logicals.length; i++) {
+        var s = parsed.logicals[i]
+        if (!s || stripMarkup(s.Name) !== fav.name) continue
+        hint = Number(s.Status) === 1 ? s.Load + "% \u00b7 " + stripMarkup(s.City || countryName) : "offline"
+        break
+      }
+    }
+    return { label: fav.name, hint: hint || countryName }
+  }
+  if (fav.kind === "city") {
+    var cities = cityRows(parsed, fav.filter || "all", fav.country).filter(function(r) { return r.name === fav.city })
+    return { label: fav.city + ", " + countryName, hint: typeSuffix + (cities.length ? cities[0].bestLoad + "% load" : "unavailable") }
+  }
+  return { label: countryName, hint: typeSuffix + "fastest" }
 }
 
 function countryRowsWhere(logicals, countryNames, predicate, sortByName) {
@@ -244,7 +333,7 @@ function countryRowsWhere(logicals, countryNames, predicate, sortByName) {
   var rows = []
   for (var code in result) {
     var row = result[code]
-    row.hint = row.count + " server" + (row.count === 1 ? "" : "s") + " \u00b7 " + row.bestLoad + "% best load"
+    row.hint = row.count + " server" + (row.count === 1 ? "" : "s") + " \u00b7 " + row.bestLoad + "% load"
     rows.push(row)
   }
   rows.sort(function(a, b) {
