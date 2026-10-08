@@ -123,11 +123,11 @@ Panel {
 
   readonly property bool headerHasCursor: cursorActive && focusSection === "header"
 
-  function buildRows() {
+  // Live tunnel info (uptime, rates) changes every second; keep it in its own
+  // binding so the server list isn't rebuilt (and its rows re-created under
+  // the pointer) on every tick.
+  function buildInfoRows() {
     var info = []
-    var favs = []
-    var countries = []
-    var actions = []
     if (serverLabel !== "") info.push({ action: "copyServer", label: "Server", hint: serverLabel })
     if (service && service.tunnelIp !== "") info.push({ action: "copyIp", label: "Tunnel IP", hint: service.tunnelIp })
     if (service && service.rxRate !== "") info.push({ action: "none", label: "Download", hint: service.rxRate })
@@ -135,7 +135,12 @@ Panel {
     if (service && service.protocol !== "") info.push({ action: "none", label: "Protocol", hint: service.protocol })
     if (service && service.serverLoad !== "") info.push({ action: "none", label: "Server load", hint: service.serverLoad })
     if (service && service.connectedUptime !== "") info.push({ action: "none", label: "Connected for", hint: service.connectedUptime })
+    return info
+  }
 
+  function buildListRows() {
+    var favs = []
+    var countries = []
     if (service) {
       for (var f = 0; f < favorites.length; f++) {
         var d = service.describeFavorite(favorites[f])
@@ -187,15 +192,14 @@ Panel {
         for (var i = 0; i < rows.length; i++) pushCountry(rows[i])
       }
     }
-    actions.push({ action: "refresh", label: "Refresh", hint: "" })
-    return { info: info, favs: favs, countries: countries, actions: actions }
+    return { favs: favs, countries: countries }
   }
 
-  readonly property var allRows: buildRows()
-  readonly property var infoRows: allRows.info
-  readonly property var favoriteRows: allRows.favs
-  readonly property var countryRows: allRows.countries
-  readonly property var actionRows: allRows.actions
+  readonly property var listRows: buildListRows()
+  readonly property var infoRows: buildInfoRows()
+  readonly property var favoriteRows: listRows.favs
+  readonly property var countryRows: listRows.countries
+  readonly property var actionRows: [{ action: "refresh", label: "Refresh", hint: "" }]
   readonly property int visibleCountryCount: root.serversExpanded ? countryRows.length : 0
   readonly property int serversOffset: favoriteRows.length
   readonly property int infoOffset: serversOffset + visibleCountryCount
@@ -220,7 +224,29 @@ Panel {
     selectedIndex = 0
   }
 
+  // Set while the cursor moves by keyboard so the selected row scrolls into
+  // view; pointer-driven selection leaves the scroll position alone.
+  property bool _keyboardCursor: false
+
+  function scrollItemIntoView(item) {
+    if (!panelFlick || !item) return
+    Qt.callLater(function() {
+      if (!item) return
+      var margin = Style.space(6)
+      var point = item.mapToItem(panelFlick.contentItem, 0, 0)
+      var top = point.y
+      var bottom = top + item.height
+      var viewTop = panelFlick.contentY
+      var viewBottom = viewTop + panelFlick.height
+      var maxY = Math.max(0, panelFlick.contentHeight - panelFlick.height)
+      if (top < viewTop + margin) panelFlick.contentY = Math.max(0, top - margin)
+      else if (bottom > viewBottom - margin) panelFlick.contentY = Math.min(maxY, bottom + margin - panelFlick.height)
+    })
+  }
+
   function moveCursor(delta) {
+    pointerGate.reset()
+    _keyboardCursor = true
     if (!cursorActive) { cursorActive = true; return }
     if (focusSection === "header") {
       if (delta > 0 && cursorRowCount > 0) {
@@ -259,6 +285,7 @@ Panel {
 
   // Search results start after the Type row; put the cursor on the first.
   function selectFirstResult() {
+    _keyboardCursor = true
     cursorActive = true
     focusSection = "rows"
     selectedIndex = Math.min(serversOffset + 1, Math.max(0, cursorRowCount - 1))
@@ -309,6 +336,13 @@ Panel {
         searchFocusTimer.restart()
       }
     }
+  }
+
+  // Only real pointer movement moves the cursor; rows re-created under a
+  // still pointer (list rebuilds, expansion) must not steal the selection.
+  PointerMoveGate {
+    id: pointerGate
+    referenceItem: column
   }
 
   // KeyboardPanel focuses the key catcher just after opening; take focus
@@ -649,6 +683,7 @@ Panel {
     readonly property bool starred: root.isFavorite(fav)
 
     readonly property bool rowSelected: root.rowSelected(rowIndex)
+    onRowSelectedChanged: if (rowSelected && root._keyboardCursor) root.scrollItemIntoView(row)
 
     hasCursor: rowSelected
     foreground: root.foreground
@@ -662,7 +697,9 @@ Panel {
       anchors.fill: parent
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
-      onContainsMouseChanged: if (containsMouse) {
+      onPositionChanged: function(mouse) {
+        if (!pointerGate.moved(rowMouse, mouse)) return
+        root._keyboardCursor = false
         root.cursorActive = true
         root.focusSection = "rows"
         root.selectedIndex = row.rowIndex
