@@ -38,7 +38,54 @@ Status and one-click fastest-server connection for Proton VPN in the menu bar.
   instantly (optimistically) and reconciles with the real VPN state.
 - Right click connects to the fastest eligible Proton server or disconnects.
 - Middle click refreshes status.
-- Keyboard navigation: `j`/`k`, `enter`, `t`, `c`, `s`, `f`, `b`, `/`, `r`, and `esc`.
+- Keyboard navigation: `j`/`k`, `enter`, `t`, `c`, `s`, `f`, `b`, `/`, `g` (settings), `m` (map), `r`, and `esc`.
+
+## More features
+
+- **Protection state.** The icon and panel say whether the tunnel is really
+  protecting you: *protected* (tunnel up, default route through it, DNS on the
+  tunnel, bytes flowing), *not protected* (connected but traffic or DNS
+  bypasses it), *no traffic* (nothing received for 3+ minutes), or *blocked*
+  (Proton's kill switch is cutting traffic with no tunnel). The panel names the
+  reason.
+- **Exit IP** of the VPN, fetched through the tunnel interface only (it can
+  only succeed through the tunnel), while the panel is open.
+- **NETWORK section:** Wi-Fi or interface, local IP, gateway and DNS, plus a
+  note when Tailscale is running with the kill switch armed (the kill switch
+  blocks tailnet traffic).
+- **SETTINGS section** (`g`): kill switch, NetShield, port forwarding, Moderate
+  NAT and VPN Accelerator (through `protonvpn config set`), and the protocol
+  (WireGuard / OpenVPN UDP / OpenVPN TCP; Proton's CLI has no command for it, so
+  this edits `~/.config/Proton/VPN/settings.json` atomically and applies on the
+  next connect). Proton's kill switch is `off` or `standard` (block while the
+  VPN is active).
+- **Always On** (a SETTINGS row, off by default): reconnects after an
+  unexpected drop to your last target, waiting 30s between tries and falling
+  back to the fastest server after one failed try. A disconnect made from the
+  plugin is respected; one made outside it (`protonvpn disconnect` in a
+  terminal) can't be told apart from a drop and gets reconnected. Turning it on
+  while disconnected connects immediately. After a shell restart it waits for
+  your first connect before it acts.
+- **MAP** (`m`): an offline world map from bundled Natural Earth outlines and
+  the cached server list's coordinates (no tiles, no network). Dots are servers
+  for the selected type, favorite countries are highlighted, the connected
+  server is ringed, Secure Core shows a dashed entry-to-exit arc, and clicking
+  a dot opens that country in the list.
+
+### Polling
+
+The bar mounts one widget per monitor; they elect a leader so there is one
+poller, and the other monitor copies its state. Closed, the plugin only samples
+cheap state (`nmcli`, `ip`, `resolvectl`, sysfs) every 5 seconds and runs the
+Proton CLI when that sample changes, or every 5+ minutes. With the panel open it
+asks the CLI every *Status refresh while open* seconds (default 30). This avoids
+hammering the CLI, which reads Proton's session through the keyring.
+
+If Proton's keyring entries are ever corrupted by Omarchy's plaintext keyring
+(raw newlines in the session key), Proton's loader honours
+`PROTON_LOADER_OVERRIDES=keyring=json` in the environment of the `protonvpn`
+process. This plugin does not set it (nothing needed it here, and switching the
+backend makes the CLI miss an existing session).
 
 ## Backend
 
@@ -118,6 +165,22 @@ desktop VPN (based on the design in
   automatically (through its WebUI, reachable only inside the namespace).
   qBittorrent is also bound to the tunnel interface, so if it is ever started
   outside, it gets no network.
+- `pvpn-torrent-check` (the panel's **Check for leaks** row) runs about twenty
+  live checks: the namespace holds only the tunnel interface, the default route,
+  a recent handshake, the default-deny firewall, the exit address differing from
+  your real one, in-tunnel DNS, no `resolve`/`mdns` bypass, IPv6 off, the
+  fwmark that keeps the tunnel out of the desktop VPN, the forwarded port
+  matching qBittorrent's, every torrent app's real namespace, and the wrapper
+  and launchers. Reports are saved to `~/Documents/VPN leak checks/` (newest 20).
+  `sudo pvpn-torrent-check --fail-closed` also takes the tunnel down for a few
+  seconds to prove nothing gets out.
+- Other torrent clients (Transmission, Deluge, rtorrent, ktorrent, aria2c, and
+  their system services) running outside the tunnel raise the same error badge
+  and notification as qBittorrent. Only qBittorrent is wrapped into the tunnel;
+  the others are detected, not moved.
+- The torrent tunnel's exit IP is shown in the panel.
+- The installer removes the downloaded WireGuard config once the root-only copy
+  is installed, since it holds a private key.
 - The panel gets a TORRENTS section: tunnel on/off, server, forwarded port,
   last handshake, and whether qBittorrent is inside the tunnel. The bar icon
   warns if qBittorrent is ever found running outside it.
