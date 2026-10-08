@@ -20,7 +20,8 @@
     "defaultSection": "right",
     "defaults": {
       "refreshIntervalSec": 30,
-      "notificationsEnabled": true
+      "notificationsEnabled": true,
+      "alwaysOn": false
     },
     "schema": [
       {
@@ -39,6 +40,13 @@
         "label": "Desktop notifications",
         "description": "Show a notification when the VPN connects, disconnects, or fails.",
         "defaultValue": true
+      },
+      {
+        "key": "alwaysOn",
+        "type": "boolean",
+        "label": "Always On",
+        "description": "Reconnect automatically when the VPN drops unexpectedly (to your last server, or the fastest after one failed try). A disconnect from the plugin is respected. Turning it on while disconnected connects immediately.",
+        "defaultValue": false
       }
     ]
   }

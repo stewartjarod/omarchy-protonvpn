@@ -440,6 +440,8 @@ var PROTON_SETTINGS = [
   { key: "port-forwarding", label: "Port forwarding", kind: "cli", values: ["off", "on"], show: {} },
   { key: "moderate-nat", label: "Moderate NAT", kind: "cli", values: ["off", "on"], show: {} },
   { key: "vpn-accelerator", label: "VPN Accelerator", kind: "cli", values: ["off", "on"], show: {} },
+  { key: "always-on", label: "Always On", kind: "plugin", values: ["off", "on"],
+    show: { "off": "off", "on": "on \u00b7 reconnects after a drop" } },
   { key: "protocol", label: "Protocol", kind: "file", values: ["wireguard", "openvpn-udp", "openvpn-tcp"],
     show: { "wireguard": "WireGuard", "openvpn-udp": "OpenVPN UDP", "openvpn-tcp": "OpenVPN TCP" } }
 ]
@@ -579,6 +581,19 @@ function claimLeader(id, now, leaseMs) {
     return true
   }
   return false
+}
+
+// Whether the user wants the VPN up (Always On acts only on this): set by a
+// connect from the plugin, cleared by a disconnect from the plugin. Shared so
+// whichever instance is the leader sees it.
+var _wantUp = false
+
+function setWantUp(v) {
+  _wantUp = v
+}
+
+function wantUp() {
+  return _wantUp
 }
 
 // One connect/disconnect at a time, across instances (a second `protonvpn
@@ -746,4 +761,65 @@ function protectionState(cliConnected, q, rxIdleMs) {
   if (q.tunnelDns.length === 0) return { state: "leaking", short: "no tunnel DNS", reason: "No DNS servers are set on the tunnel" }
   if (rxIdleMs > 180000) return { state: "stale", short: "no traffic", reason: "Nothing received through the tunnel for 3+ minutes" }
   return { state: "protected", short: "", reason: "" }
+}
+
+// ===== Map data ============================================================
+
+// Server dots for the active filter: one per 1-degree cell and exit country,
+// with the number of servers behind it. Uses coordinates already in Proton's
+// cached server list (no geo-IP, no tiles).
+function mapPoints(parsed, filterKey) {
+  if (!parsed) return []
+  var pred = filterPredicate(filterKey, parsed.maxTier)
+  var cells = {}
+  for (var i = 0; i < parsed.logicals.length; i++) {
+    var s = parsed.logicals[i]
+    if (!s || Number(s.Status) !== 1 || !s.Location || !pred(s)) continue
+    var lat = Number(s.Location.Lat), lon = Number(s.Location.Long)
+    if (!isFinite(lat) || !isFinite(lon)) continue
+    var code = String(s.ExitCountry || "").toUpperCase()
+    var key = Math.round(lat) + "," + Math.round(lon) + "|" + code
+    if (!cells[key]) cells[key] = { lat: lat, lon: lon, code: code, count: 0 }
+    cells[key].count += 1
+  }
+  var out = []
+  for (var k in cells) out.push(cells[k])
+  return out
+}
+
+// Per-filter cache of mapPoints, valid for one parsed list. Plain module
+// state, so reading it from a QML binding doesn't write a property.
+var _mapCacheFor = null
+var _mapCache = {}
+
+function mapPointsCached(parsed, filterKey) {
+  if (parsed !== _mapCacheFor) { _mapCacheFor = parsed; _mapCache = {} }
+  if (!_mapCache[filterKey]) _mapCache[filterKey] = mapPoints(parsed, filterKey)
+  return _mapCache[filterKey]
+}
+
+// Location of a server by name: { lat, lon, exit, entry, secureCore }.
+function serverLocation(parsed, name) {
+  if (!parsed || !name) return null
+  for (var i = 0; i < parsed.logicals.length; i++) {
+    var s = parsed.logicals[i]
+    if (!s || stripMarkup(s.Name) !== name || !s.Location) continue
+    return { lat: Number(s.Location.Lat), lon: Number(s.Location.Long),
+             exit: String(s.ExitCountry || "").toUpperCase(), entry: String(s.EntryCountry || "").toUpperCase(),
+             secureCore: hasFeature(s, FEATURE_SECURE_CORE) }
+  }
+  return null
+}
+
+// Mean location of a country's regular (non Secure Core) servers; where the
+// Secure Core entry arc starts.
+function countryCenter(parsed, code) {
+  if (!parsed) return null
+  var lat = 0, lon = 0, n = 0
+  for (var i = 0; i < parsed.logicals.length; i++) {
+    var s = parsed.logicals[i]
+    if (!s || !s.Location || String(s.ExitCountry || "").toUpperCase() !== code || hasFeature(s, FEATURE_SECURE_CORE)) continue
+    lat += Number(s.Location.Lat); lon += Number(s.Location.Long); n++
+  }
+  return n > 0 ? { lat: lat / n, lon: lon / n } : null
 }

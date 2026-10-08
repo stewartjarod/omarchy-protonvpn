@@ -64,6 +64,7 @@ Panel {
   property string expandedCountry: ""
   property string expandedCity: ""
   property bool settingsExpanded: false
+  property bool mapExpanded: false
   property string searchQuery: ""
 
   // Favorites persist in this widget's shell.json entry (settings.favorites),
@@ -116,6 +117,7 @@ Panel {
     for (var key in settings) if (key !== "id") entry[key] = settings[key]
     entry.favorites = favorites
     if (service && service.lastTarget) entry.lastTarget = service.lastTarget
+    if (service) entry.alwaysOn = service.alwaysOn
     root.bar.shell.updateEntryInline(root.moduleName, entry)
   }
 
@@ -138,6 +140,7 @@ Panel {
     function onFilterChanged() { root.expandedCountry = ""; root.expandedCity = "" }
     function onConnectSucceeded() { root.showTunnel() }
     function onTargetUsed(target) { root.persistState() }
+    function onAlwaysOnToggled() { root.persistState() }
   }
 
   readonly property bool headerHasCursor: cursorActive && focusSection === "header"
@@ -162,6 +165,7 @@ Panel {
     if (service && service.protocol !== "") info.push({ action: "none", label: "Protocol", hint: service.protocol })
     if (service && service.serverLoad !== "") info.push({ action: "none", label: "Server load", hint: service.serverLoad })
     if (service && service.connectedUptime !== "") info.push({ action: "none", label: "Connected for", hint: service.connectedUptime })
+    if (service && service.connected && service.exitIp !== "") info.push({ action: "copyText", value: service.exitIp, label: "Exit IP", hint: service.exitIp })
     return info
   }
 
@@ -248,6 +252,7 @@ Panel {
       var v = service.protonSettingValue(d)
       var hint = Model.showSettingValue(d, v)
       if (d.key === "protocol" && service.connected) hint += " \u00b7 next connect"
+      if (d.key === "always-on" && !service.alwaysOn && !service.connected) hint = "off \u00b7 turning on connects now"
       rows.push({ action: "cycleSetting", value: d, label: d.label, hint: hint })
     }
     return rows
@@ -456,6 +461,30 @@ Panel {
     showTunnel()
   }
 
+  function toggleMap() {
+    mapExpanded = !mapExpanded
+  }
+
+  // A map dot was clicked: open its country in the list and put the cursor
+  // on it.
+  function showCountry(code) {
+    searchQuery = ""
+    serversExpanded = true
+    expandedCountry = code
+    expandedCity = ""
+    Qt.callLater(function() {
+      for (var i = 0; i < countryRows.length; i++) {
+        if (countryRows[i].action === "toggleCountry" && countryRows[i].value === code) {
+          _keyboardCursor = true
+          cursorActive = true
+          focusSection = "rows"
+          selectedIndex = serversOffset + i
+          return
+        }
+      }
+    })
+  }
+
   function toggleSettings() {
     settingsExpanded = !settingsExpanded
     if (settingsExpanded && service) service.refreshSettings()
@@ -480,6 +509,7 @@ Panel {
       cursorActive = false
       serversExpanded = false
       settingsExpanded = false
+      mapExpanded = false
       expandedCountry = ""
       expandedCity = ""
       searchQuery = ""
@@ -541,6 +571,7 @@ Panel {
         else if (t === "f" || t === "F") { if (root.service) root.service.cycleServerFilter() }
         else if (t === "b" || t === "B") root.favoriteCursor()
         else if (t === "g" || t === "G") root.toggleSettings()
+        else if (t === "m" || t === "M") root.toggleMap()
         else if (t === "/") root.focusSearch()
         else if (t === "r" || t === "R") {
           if (root.service) { root.service.refresh(true); root.service.refreshServerList() }
@@ -619,6 +650,48 @@ Panel {
 
           PanelSeparator {
             foreground: root.foreground
+          }
+
+          Column {
+            width: parent.width
+            spacing: Style.space(2)
+            visible: root.service && root.service.mapPointsFor(root.service.serverFilter).length > 0
+
+            Item {
+              width: parent.width
+              implicitHeight: mapHeader.implicitHeight + Style.space(4)
+
+              PanelSectionHeader {
+                id: mapHeader
+                anchors.left: parent.left
+                anchors.right: parent.right
+                text: (root.mapExpanded ? "\u25be " : "\u25b8 ") + "MAP"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.toggleMap()
+              }
+            }
+
+            MapView {
+              visible: root.mapExpanded
+              width: parent.width
+              foreground: root.foreground
+              accent: Color.accent
+              points: root.mapExpanded && root.service ? root.service.mapPointsFor(root.service.serverFilter) : []
+              connectedLoc: root.service ? root.service.connectedLocation : null
+              arcFrom: root.service ? root.service.secureCoreEntry : null
+              favoriteCodes: {
+                var out = {}
+                for (var i = 0; i < root.favorites.length; i++) if (root.favorites[i].country) out[root.favorites[i].country] = true
+                return out
+              }
+              onCountryClicked: function(code) { root.showCountry(code) }
+            }
           }
 
           Column {

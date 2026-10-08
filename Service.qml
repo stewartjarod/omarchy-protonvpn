@@ -204,6 +204,7 @@ Item {
     else if (_rxChangedAt === 0) _rxChangedAt = now
     setTunnelDevice(q.vpnDevice)
     _protectionTick++
+    maybeLookupExitIp()
     if (fromShared) return
 
     // Leader: decide whether the CLI needs to run.
@@ -211,7 +212,32 @@ Item {
     var mismatch = (q.vpnDevice !== "") !== connected
     if (!installed || !_stateKnown || mismatch || now - _lastCliAt >= interval) refresh(true)
     else Model.publishShared(_lastStatusStdout, text, now)
+    maybeAlwaysOn()
   }
+
+  // Public address of the desktop VPN, fetched through the tunnel interface
+  // (so it can only succeed through it) while this instance's panel is open,
+  // once per new tunnel/server.
+  property string exitIp: ""
+  property string _exitIpFor: ""
+  property real _exitIpTriedAt: 0
+
+  function maybeLookupExitIp() {
+    if (!connected || tunnelDevice === "") {
+      if (exitIp !== "" || _exitIpFor !== "") { exitIp = ""; _exitIpFor = "" }
+      return
+    }
+    if (!panelOpen || exitIpProcess.running) return
+    var key = tunnelDevice + "|" + serverName
+    if (key === _exitIpFor) return
+    if (Date.now() - _exitIpTriedAt < 60000 && exitIp === "" && _exitIpFor === "") return
+    _exitIpFor = key
+    _exitIpTriedAt = Date.now()
+    exitIpProcess.command = ["curl", "-s", "--max-time", "6", "--interface", tunnelIp !== "" ? tunnelIp : tunnelDevice, "https://ifconfig.me/ip"]
+    exitIpProcess.running = true
+  }
+
+  onPanelOpenChanged: if (panelOpen) maybeLookupExitIp()
 
   function setTunnelDevice(device) {
     if (device === tunnelDevice) return
@@ -236,6 +262,45 @@ Item {
     if (snap.status !== "") applyStatus(snap.status, true)
   }
 
+  // ---- Always On: reconnect after an unexpected drop ----
+  // Off by default. Acts only in the leader instance and only when the user
+  // wanted the VPN up (a plugin disconnect clears that). 30s backoff between
+  // tries; after one failed try it falls back to "fastest" instead of the
+  // last target.
+  property int _alwaysOnLocal: -1
+  readonly property bool alwaysOn: _alwaysOnLocal !== -1 ? _alwaysOnLocal === 1 : boolSetting("alwaysOn", false)
+  signal alwaysOnToggled()
+  property real _aoNextAt: 0
+  property bool _aoFailed: false
+  property bool _autoAttempt: false
+  property bool _aoNotified: false
+
+  function setAlwaysOn(on) {
+    _alwaysOnLocal = on ? 1 : 0
+    alwaysOnToggled()
+    if (on && !connected && !toggling) {
+      // Turning it on while disconnected connects right away.
+      connect()
+    } else if (on && connected) {
+      Model.setWantUp(true)
+    }
+    if (!on) _aoFailed = false
+  }
+
+  function maybeAlwaysOn() {
+    var now = Date.now()
+    if (!isLeader || !alwaysOn || connected || connecting || toggling || !_stateKnown) return
+    if (!Model.wantUp() || Model.actionBusy(now) || now < _aoNextAt) return
+    _aoNextAt = now + 30000
+    if (!_aoNotified) {
+      _aoNotified = true
+      notify("Proton VPN dropped", _aoFailed ? "Reconnecting to the fastest server\u2026" : "Reconnecting\u2026", false)
+    }
+    _autoAttempt = true
+    if (_aoFailed || !lastTarget) connectServer("", "", "", "all", true)
+    else connectServer(lastTarget.code, lastTarget.city, lastTarget.name, lastTarget.filter, true)
+  }
+
   // ---- Proton settings (kill switch, NetShield, ... and the protocol) ----
   property var protonSettings: ({})
   property bool settingBusy: false
@@ -248,6 +313,7 @@ Item {
   }
 
   function protonSettingValue(def) {
+    if (def.kind === "plugin") return alwaysOn ? "on" : "off"
     return def.kind === "file" ? protocolSetting : (protonSettings[def.key] || "")
   }
 
@@ -255,6 +321,7 @@ Item {
   function cycleSetting(def) {
     if (settingBusy) return
     var next = Model.nextSettingValue(def, protonSettingValue(def))
+    if (def.kind === "plugin") { setAlwaysOn(next === "on"); return }
     settingBusy = true
     _settingKey = def.key
     _settingValue = next
@@ -335,19 +402,31 @@ Item {
 
   function searchRows(query) { return Model.searchRows(_parsedList, serverFilter, query, serverRows[serverFilter] || [], _countryNames, 40) }
   function describeFavorite(fav) { return Model.describeFavorite(_parsedList, fav, _countryNames) }
+  // ---- map data (computed on demand, cached per filter) ----
+  function mapPointsFor(filter) {
+    return Model.mapPointsCached(_parsedList, filter)
+  }
+
+  // Where the connected server is (and, for Secure Core, where it enters).
+  readonly property var connectedLocation: connected && serverName !== "" ? Model.serverLocation(_parsedList, serverName) : null
+  readonly property var secureCoreEntry: connectedLocation && connectedLocation.secureCore ? Model.countryCenter(_parsedList, connectedLocation.entry) : null
+
   function cityRows(country) { return Model.cityRows(_parsedList, serverFilter, country) }
   function serverRowsIn(country, city) { return Model.serverRowsIn(_parsedList, serverFilter, country, city) }
 
   // Connects to the fastest server matching the active type filter, narrowed
   // by country and/or city, using the CLI's feature flags where they exist
   // (--p2p / --securecore / --tor). `name` connects to one specific server.
-  function connectServer(code, city, name, filterKey) {
+  function connectServer(code, city, name, filterKey, auto) {
     if (toggling) return
     if (!Model.beginAction(Date.now(), "connect")) return
     var filter = filterKey || serverFilter
     var target = { code: code || "", city: city || "", name: name || "", filter: filter }
-    _lastTargetLocal = target
-    targetUsed(target)
+    if (!auto) {
+      _lastTargetLocal = target
+      targetUsed(target)
+      Model.setWantUp(true)
+    }
     _desiredConnected = 1
     var args = ["protonvpn", "connect"]
     var flag = Model.filterFlag(filter)
@@ -413,6 +492,12 @@ Item {
       }
     }
     _stateKnown = true
+    if (connected) {
+      _aoNotified = false
+      _aoFailed = false
+      if (alwaysOn) Model.setWantUp(true)
+    }
+    maybeAlwaysOn()
   }
 
   function sampleTraffic() {
@@ -448,6 +533,7 @@ Item {
       return
     }
     if (!Model.beginAction(Date.now(), "connect")) return
+    Model.setWantUp(true)
     toggling = true
     connecting = true
     lastError = ""
@@ -460,6 +546,8 @@ Item {
   function disconnect() {
     if (toggling || !connected) return
     if (!Model.beginAction(Date.now(), "disconnect")) return
+    Model.setWantUp(false)
+    _aoNotified = false
     toggling = true
     lastError = ""
     _desiredConnected = 0
@@ -696,6 +784,17 @@ Item {
   }
 
   Process {
+    id: exitIpProcess
+    command: []
+    stdout: StdioCollector { id: exitIpStdout; waitForEnd: true }
+    onExited: function() {
+      var ip = String(exitIpStdout.text || "").trim()
+      if (/^[0-9a-fA-F:.]{3,45}$/.test(ip)) root.exitIp = ip
+      else { root.exitIp = ""; root._exitIpFor = "" }
+    }
+  }
+
+  Process {
     id: quickProcess
     command: ["sh", "-c", "export LC_ALL=C; echo '##dev'; nmcli -t -f DEVICE,TYPE,STATE dev status 2>/dev/null; echo '##con'; nmcli -t -f NAME,TYPE con show --active 2>/dev/null; echo '##route'; ip route get 1.1.1.1 2>/dev/null | head -1; echo '##gw'; ip -4 route show default 2>/dev/null | head -1; echo '##addr'; ip -4 -o addr show scope global 2>/dev/null | awk '{print $2, $4}' | head -1; echo '##dns'; resolvectl dns 2>/dev/null; echo '##rx'; for d in /sys/class/net/proton* /sys/class/net/pvpn*; do [ -d \"$d\" ] && echo \"$(basename $d) $(cat $d/statistics/rx_bytes 2>/dev/null)\"; done; echo '##wifi'; nmcli -t -f ACTIVE,SSID,SIGNAL dev wifi 2>/dev/null | grep '^yes' | head -1; echo '##ts'; [ -d /sys/class/net/tailscale0 ] && echo up; true"]
     stdout: StdioCollector { id: quickStdout; waitForEnd: true }
@@ -762,10 +861,14 @@ Item {
       if (exitCode !== 0) root.connecting = false
       var stdout = String(toggleStdout.text || root._toggleOutput || "")
       var stderr = String(toggleStderr.text || root._toggleError || "")
+      var wasAuto = root._autoAttempt
+      root._autoAttempt = false
       if (exitCode === 0) {
         root.lastError = ""
         root.actionStatus = ""
+        root._aoFailed = false
       } else {
+        if (wasAuto) root._aoFailed = true
         root.lastError = Model.elideStatus(stderr || stdout || "Proton VPN command failed")
         root.actionStatus = root.lastError
         actionStatusTimer.restart()
