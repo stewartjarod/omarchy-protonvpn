@@ -1,0 +1,9 @@
+[Unit]
+Description=Proton VPN torrent tunnel port forwarding (NAT-PMP) and status
+BindsTo=pvpn-torrent.service
+After=pvpn-torrent.service
+
+[Service]
+ExecStart=/usr/local/bin/pvpn-torrent-portfwd
+Restart=always
+RestartSec=10

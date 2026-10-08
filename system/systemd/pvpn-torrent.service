@@ -1,0 +1,14 @@
+[Unit]
+Description=Proton VPN torrent tunnel (WireGuard in network namespace pvpntor)
+Wants=network-online.target
+After=network-online.target
+Wants=pvpn-torrent-portfwd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/pvpn-torrent-up
+ExecStop=/usr/local/bin/pvpn-torrent-down
+
+[Install]
+WantedBy=multi-user.target

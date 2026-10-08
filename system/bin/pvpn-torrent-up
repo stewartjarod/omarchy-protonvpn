@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# ============================================================================
+#  pvpn-torrent-up - build a network namespace whose ONLY way out is a Proton
+#  WireGuard tunnel, for qBittorrent to run inside.
+#
+#  A namespace has its own interfaces, routes and resolv.conf. With just lo and
+#  the WireGuard interface inside, there is no default route and no resolver
+#  unless the tunnel is up, so torrent traffic (DNS included) cannot leak: there
+#  is no path out other than the tunnel. It is independent of the desktop VPN,
+#  which can be toggled freely without exposing qBittorrent.
+#
+#  Based on the design in github.com/ralphk-86/omarchy-proton (qbt-netns-up).
+#  Run via: systemctl start pvpn-torrent.service
+# ============================================================================
+set -euo pipefail
+. /usr/local/lib/pvpn-torrent/common.sh
+
+log() { echo "[pvpn-torrent] $*"; }
+
+if [[ ! -r "$WG_CONF" ]]; then
+  log "ERROR: $WG_CONF not found. Install a Proton WireGuard config with:"
+  log "  sudo install.sh <path-to-config.conf>"
+  exit 1
+fi
+
+ADDRESS=$(wg_get "$WG_CONF" interface Address)
+DNS=$(wg_get "$WG_CONF" interface DNS)
+PRIVKEY=$(wg_get "$WG_CONF" interface PrivateKey)
+PEERKEY=$(wg_get "$WG_CONF" peer PublicKey)
+ENDPOINT=$(wg_get "$WG_CONF" peer Endpoint)
+ALLOWED=$(wg_get "$WG_CONF" peer AllowedIPs)
+PSK=$(wg_get "$WG_CONF" peer PresharedKey)
+: "${ALLOWED:=0.0.0.0/0}"
+: "${DNS:=$FALLBACK_DNS}"
+ALLOWED=${ALLOWED// /}
+
+if [[ -z "$ADDRESS" || -z "$PRIVKEY" || -z "$PEERKEY" || -z "$ENDPOINT" ]]; then
+  log "ERROR: could not parse $WG_CONF (need Address, PrivateKey, peer PublicKey, Endpoint)."
+  exit 1
+fi
+
+# --- tear down any previous state (idempotent) ------------------------------
+if ns_exists; then
+  ip -n "$NS" link del "$WG_IF" 2>/dev/null || true
+  ip netns del "$NS" 2>/dev/null || true
+fi
+ip link del "$WG_IF" 2>/dev/null || true
+
+# --- namespace ---------------------------------------------------------------
+log "creating namespace $NS"
+ip netns add "$NS"
+# A fresh namespace starts from kernel defaults, not the host sysctl; IPv6 off.
+ip netns exec "$NS" sysctl -qw net.ipv6.conf.all.disable_ipv6=1 net.ipv6.conf.default.disable_ipv6=1
+ip -n "$NS" link set lo up
+
+# Default-deny firewall inside the namespace, loaded before the tunnel moves
+# in: egress and ingress only via lo or the tunnel.
+ip netns exec "$NS" nft -f - <<NFT
+table inet pvpntorguard {
+    chain output {
+        type filter hook output priority filter; policy drop;
+        oifname "lo"      accept
+        oifname "$WG_IF"  accept
+    }
+    chain input {
+        type filter hook input priority filter; policy drop;
+        iifname "lo"      accept
+        iifname "$WG_IF"  accept
+        ct state established,related accept
+    }
+}
+NFT
+
+# --- WireGuard ---------------------------------------------------------------
+# Create the interface in the root namespace (so its encrypted socket can reach
+# the internet), configure it, then move it in. The socket stays in the root
+# namespace; the plaintext side lives only in $NS.
+log "creating $WG_IF"
+ip link add "$WG_IF" type wireguard
+
+KEYDIR=$(mktemp -d); chmod 700 "$KEYDIR"
+trap 'rm -rf "$KEYDIR"' EXIT
+printf '%s\n' "$PRIVKEY" > "$KEYDIR/key"
+WG_ARGS=(private-key "$KEYDIR/key")
+WG_ARGS+=(peer "$PEERKEY" endpoint "$ENDPOINT" allowed-ips "$ALLOWED" persistent-keepalive 25)
+if [[ -n "$PSK" ]]; then
+  printf '%s\n' "$PSK" > "$KEYDIR/psk"
+  WG_ARGS+=(preshared-key "$KEYDIR/psk")
+fi
+wg set "$WG_IF" "${WG_ARGS[@]}"
+rm -rf "$KEYDIR"
+
+ip link set "$WG_IF" netns "$NS"
+
+IFS=',' read -ra ADDRS <<< "$ADDRESS"
+for a in "${ADDRS[@]}"; do
+  a=$(echo "$a" | tr -d ' ')
+  [[ -z "$a" || "$a" == *:* ]] && continue   # IPv6 is disabled in the namespace
+  ip -n "$NS" addr add "$a" dev "$WG_IF"
+done
+ip -n "$NS" link set "$WG_IF" up
+ip -n "$NS" route add default dev "$WG_IF"
+
+# --- namespace-local DNS -----------------------------------------------------
+# /etc/netns/<ns>/resolv.conf replaces /etc/resolv.conf inside the namespace;
+# the resolver is only reachable through the tunnel.
+mkdir -p "/etc/netns/$NS"
+{
+  echo "# In-tunnel DNS, reachable only through the WireGuard tunnel."
+  for d in ${DNS//,/ }; do
+    [[ "$d" == *:* ]] && continue
+    echo "nameserver $d"
+  done
+} > "/etc/netns/$NS/resolv.conf"
+chmod 644 "/etc/netns/$NS/resolv.conf"
+
+# The host nsswitch uses systemd-resolved over a UNIX socket, which a network
+# namespace does not isolate: resolved (in the root namespace) would answer
+# over the real interface. Plain `dns` forces lookups through the tunnel.
+cat > "/etc/netns/$NS/nsswitch.conf" <<'NSS'
+# Namespace-local NSS: no `resolve`/`mdns`, so DNS only goes via the tunnel.
+passwd:     files systemd
+group:      files [SUCCESS=merge] systemd
+shadow:     files systemd
+gshadow:    files systemd
+publickey:  files
+hosts:      files myhostname dns
+networks:   files
+protocols:  files
+services:   files
+ethers:     files
+rpc:        files
+netgroup:   files
+NSS
+chmod 644 "/etc/netns/$NS/nsswitch.conf"
+
+# --- status for the bar ------------------------------------------------------
+install -d -m 755 "$RUN_DIR"
+printf '%s\n' "$(wg_server_tag "$WG_CONF")" > "$RUN_DIR/server"
+chmod 644 "$RUN_DIR/server"
+
+log "namespace $NS is up"
+ip -n "$NS" -brief addr show

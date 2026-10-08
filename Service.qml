@@ -58,6 +58,22 @@ Item {
   // "acquiring" icon.
   property bool connecting: false
 
+  // ---- torrent tunnel (system/ install; see README) ----
+  // Installed when /usr/local/bin/pvpn-torrent-launch exists. The namespace
+  // check and qBittorrent's whereabouts come from comparing network namespace
+  // inodes, which needs no root; tunnel details come from the status file the
+  // root port-forward loop writes.
+  property bool torrentInstalled: false
+  property bool _torrentNs: false
+  readonly property bool torrentUp: _torrentNs && torrentStatus.up === "1"
+  property bool torrentBusy: false
+  property var torrentStatus: ({})
+  // "none" | "inside" | "outside" (leak: real connection) | "stale" (in an
+  // old namespace after a tunnel restart: no network until restarted)
+  property string qbtState: "none"
+  readonly property bool torrentLeak: qbtState === "outside" && torrentInstalled
+  property bool _leakNotified: false
+
   readonly property int refreshIntervalSec: intSetting("refreshIntervalSec", 30, 5, 3600)
   readonly property bool notificationsEnabled: boolSetting("notificationsEnabled", true)
   // Optimistic switch state: -1 follows the real `connected`, 0/1 is the
@@ -124,6 +140,40 @@ Item {
       statusProcess.running = true
     }
     if (connected) refreshDevice()
+  }
+
+  function refreshTorrent() {
+    if (qbtCheckProcess.running) return
+    qbtCheckProcess.running = true
+    torrentStatusFile.reload()
+  }
+
+  function setTorrentTunnel(on) {
+    if (torrentBusy || !torrentInstalled) return
+    torrentBusy = true
+    actionStatus = on ? "Starting torrent tunnel\u2026" : "Stopping torrent tunnel\u2026"
+    torrentToggleProcess.command = ["sudo", "-n", "systemctl", on ? "start" : "stop", "pvpn-torrent.service"]
+    torrentToggleProcess.running = true
+  }
+
+  // Through the wrapper, which re-launches inside the namespace via sudo and
+  // refuses (with a notification) when the tunnel is down.
+  function openQbittorrent() {
+    Quickshell.execDetached(["/usr/local/bin/qbittorrent"])
+    torrentRecheck.restart()
+  }
+
+  function applyQbtCheck(text) {
+    var r = Model.parseQbtCheck(text)
+    torrentInstalled = r.installed
+    _torrentNs = r.nsUp
+    qbtState = r.outside > 0 ? "outside" : (r.stale > 0 ? "stale" : (r.inside > 0 ? "inside" : "none"))
+    if (torrentLeak && !_leakNotified) {
+      _leakNotified = true
+      notify("qBittorrent is outside the torrent tunnel", "It is using your real connection. Quit it and start it from the Proton VPN panel.", true)
+    } else if (!torrentLeak) {
+      _leakNotified = false
+    }
   }
 
   function refreshServerList() {
@@ -307,6 +357,54 @@ Item {
   function formatUptime() {
     if (!connectedSince) return ""
     return Model.formatUptime(Date.now() - connectedSince)
+  }
+
+  Timer {
+    id: torrentTimer
+    interval: 10000
+    repeat: true
+    running: true
+    triggeredOnStart: true
+    onTriggered: root.refreshTorrent()
+  }
+
+  Timer {
+    id: torrentRecheck
+    interval: 2500
+    onTriggered: root.refreshTorrent()
+  }
+
+  Process {
+    id: qbtCheckProcess
+    // installed/ns header, then where each qBittorrent process lives.
+    command: ["sh", "-c", "i=0; [ -x /usr/local/bin/pvpn-torrent-launch ] && i=1; n=0; [ -e /run/netns/pvpntor ] && n=1; echo \"installed=$i ns=$n\"; ns=$(stat -Lc %i /run/netns/pvpntor 2>/dev/null); me=$(stat -Lc %i /proc/self/ns/net); for p in $(pgrep -u \"$(id -u)\" -x qbittorrent); do x=$(stat -Lc %i /proc/$p/ns/net 2>/dev/null) || continue; if [ -n \"$ns\" ] && [ \"$x\" = \"$ns\" ]; then echo inside; elif [ \"$x\" = \"$me\" ]; then echo outside; else echo stale; fi; done"]
+    stdout: StdioCollector { id: qbtCheckStdout; waitForEnd: true }
+    onExited: root.applyQbtCheck(String(qbtCheckStdout.text || ""))
+  }
+
+  Process {
+    id: torrentToggleProcess
+    command: []
+    stderr: StdioCollector { id: torrentToggleStderr; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.torrentBusy = false
+      root.actionStatus = ""
+      if (exitCode !== 0) {
+        root.lastError = Model.elideStatus(torrentToggleStderr.text || "Torrent tunnel command failed")
+        root.notify("Torrent tunnel", root.lastError, true)
+      }
+      torrentRecheck.restart()
+    }
+  }
+
+  FileView {
+    id: torrentStatusFile
+    path: "/run/pvpn-torrent/status"
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.torrentStatus = Model.parseTorrentStatus(text())
+    onLoadFailed: root.torrentStatus = ({})
+    onFileChanged: reload()
   }
 
   Timer {

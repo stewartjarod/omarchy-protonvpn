@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# ============================================================================
+#  pvpn-torrent-portfwd - keep a Proton NAT-PMP port open for the torrent
+#  tunnel, hand it to qBittorrent, and publish status for the bar.
+#
+#  Runs as root in the root namespace (pvpn-torrent-portfwd.service); anything
+#  that must happen inside the tunnel goes through `ip netns exec`.
+#
+#   * every 45s: renew the UDP+TCP mapping on Proton's gateway (60s lease)
+#   * every 15s: set qBittorrent's listening port to the mapped one through
+#     its WebUI on 127.0.0.1 inside the namespace (localhost auth bypass), and
+#     write $RUN_DIR/status for the bar
+#   * keeps the tunnel's encrypted packets off the desktop VPN: when a
+#     NetworkManager WireGuard connection (Proton's CLI) adds its
+#     "not fwmark X" policy rule, the torrent tunnel takes mark X too, so it
+#     rides the real connection instead of nesting inside the desktop VPN.
+# ============================================================================
+set -uo pipefail
+. /usr/local/lib/pvpn-torrent/common.sh
+
+PORT=""
+PORT_OK=0
+PORT_ERROR=""
+QBT_PORT=""
+cycle=0
+
+nsx() { ip netns exec "$NS" "$@"; }
+
+renew_port() {
+  local out
+  if out=$(nsx natpmpc -a 1 0 udp 60 -g "$NATPMP_GATEWAY" 2>&1) && [[ "$out" =~ Mapped\ public\ port\ ([0-9]+) ]]; then
+    PORT="${BASH_REMATCH[1]}"
+    nsx natpmpc -a 1 0 tcp 60 -g "$NATPMP_GATEWAY" >/dev/null 2>&1 || true
+    PORT_OK=1
+    PORT_ERROR=""
+    printf '%s\n' "$PORT" > "$RUN_DIR/port.tmp" && mv -f "$RUN_DIR/port.tmp" "$RUN_DIR/port"
+  else
+    PORT_OK=0
+    PORT_ERROR="NAT-PMP failed (was port forwarding enabled when the config was made?)"
+  fi
+}
+
+# qBittorrent's WebUI is only reachable inside the namespace. Skip quietly when
+# it isn't running or the WebUI is off.
+sync_qbt_port() {
+  [[ -n "$PORT" ]] || return
+  local prefs current iface
+  prefs=$(nsx curl -fsS --max-time 3 "http://127.0.0.1:$QBT_WEBUI_PORT/api/v2/app/preferences" 2>/dev/null) || { QBT_PORT=""; return; }
+  current=$(grep -oE '"listen_port":[0-9]+' <<< "$prefs" | grep -oE '[0-9]+$')
+  iface=$(grep -oE '"current_network_interface":"[^"]*"' <<< "$prefs" | sed -E 's/.*:"(.*)"/\1/')
+  QBT_PORT="$current"
+  # Also bind qBittorrent to the tunnel interface: if it is ever started
+  # outside the namespace, that interface doesn't exist there and it gets no
+  # network at all instead of using the real connection.
+  if [[ "$current" != "$PORT" || "$iface" != "$WG_IF" ]]; then
+    if nsx curl -fsS --max-time 3 --data-urlencode "json={\"listen_port\":$PORT,\"upnp\":false,\"random_port\":false,\"current_network_interface\":\"$WG_IF\"}" \
+        "http://127.0.0.1:$QBT_WEBUI_PORT/api/v2/app/setPreferences" >/dev/null 2>&1; then
+      QBT_PORT="$PORT"
+      echo "[pvpn-torrent] qBittorrent: port $PORT, bound to $WG_IF"
+    fi
+  fi
+}
+
+sync_fwmark() {
+  local mark current
+  mark=$(ip rule 2>/dev/null | grep -oE 'not from all fwmark 0x[0-9a-f]+' | head -1 | awk '{print $5}')
+  current=$(nsx wg show "$WG_IF" fwmark 2>/dev/null)
+  [[ "$current" == "off" ]] && current=""
+  if [[ -n "$mark" && "$current" != "$mark" ]]; then
+    nsx wg set "$WG_IF" fwmark "$mark" && echo "[pvpn-torrent] fwmark $mark (bypass desktop VPN)"
+  elif [[ -z "$mark" && -n "$current" ]]; then
+    nsx wg set "$WG_IF" fwmark 0
+  fi
+}
+
+write_status() {
+  local hs rx tx addr endpoint server
+  hs=$(nsx wg show "$WG_IF" latest-handshakes 2>/dev/null | awk '{print $2; exit}')
+  read -r rx tx < <(nsx wg show "$WG_IF" transfer 2>/dev/null | awk '{print $2, $3; exit}')
+  addr=$(ip -n "$NS" -4 -brief addr show "$WG_IF" 2>/dev/null | awk '{print $3}')
+  endpoint=$(nsx wg show "$WG_IF" endpoints 2>/dev/null | awk '{print $2; exit}')
+  server=$(cat "$RUN_DIR/server" 2>/dev/null)
+  {
+    echo "up=1"
+    echo "server=$server"
+    echo "address=${addr%/*}"
+    echo "endpoint=$endpoint"
+    echo "handshake=${hs:-0}"
+    echo "rx=${rx:-0}"
+    echo "tx=${tx:-0}"
+    echo "port=$PORT"
+    echo "port_ok=$PORT_OK"
+    echo "port_error=$PORT_ERROR"
+    echo "qbt_port=$QBT_PORT"
+    echo "updated=$(date +%s)"
+  } > "$RUN_DIR/status.tmp" && chmod 644 "$RUN_DIR/status.tmp" && mv -f "$RUN_DIR/status.tmp" "$RUN_DIR/status"
+}
+
+install -d -m 755 "$RUN_DIR"
+while true; do
+  if ! ns_exists || ! ip -n "$NS" link show "$WG_IF" >/dev/null 2>&1; then
+    printf 'up=0\nupdated=%s\n' "$(date +%s)" > "$RUN_DIR/status"
+    chmod 644 "$RUN_DIR/status"
+    sleep 5
+    continue
+  fi
+  sync_fwmark
+  (( cycle % 3 == 0 )) && renew_port
+  sync_qbt_port
+  write_status
+  cycle=$((cycle + 1))
+  sleep 15
+done

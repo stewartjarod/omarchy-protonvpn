@@ -401,6 +401,41 @@ function countryRowsWhere(logicals, countryNames, predicate, sortByName) {
   return rows
 }
 
+// Parses /run/pvpn-torrent/status (key=value lines from pvpn-torrent-portfwd).
+function parseTorrentStatus(text) {
+  var out = {}
+  var lines = String(text || "").split("\n")
+  for (var i = 0; i < lines.length; i++) {
+    var eq = lines[i].indexOf("=")
+    if (eq > 0) out[lines[i].substring(0, eq).trim()] = stripMarkup(lines[i].substring(eq + 1).trim())
+  }
+  return out
+}
+
+// Output of the qBittorrent namespace check in Service.qml: first line is
+// "installed=0|1 ns=0|1", then one of inside/outside/stale per qBittorrent pid.
+function parseQbtCheck(text) {
+  var lines = String(text || "").split("\n")
+  var head = lines[0] || ""
+  var r = { installed: /installed=1/.test(head), nsUp: /ns=1/.test(head), inside: 0, outside: 0, stale: 0 }
+  for (var i = 1; i < lines.length; i++) {
+    var l = lines[i].trim()
+    if (l === "inside") r.inside++
+    else if (l === "outside") r.outside++
+    else if (l === "stale") r.stale++
+  }
+  return r
+}
+
+function formatAgo(epochSeconds, nowMs) {
+  var t = Number(epochSeconds)
+  if (!isFinite(t) || t <= 0) return "never"
+  var s = Math.max(0, Math.floor(nowMs / 1000 - t))
+  if (s < 60) return s + "s ago"
+  if (s < 3600) return Math.floor(s / 60) + "m ago"
+  return Math.floor(s / 3600) + "h ago"
+}
+
 function elideStatus(text) {
   var value = stripMarkup(String(text || "").replace(/\s+/g, " ").trim())
   return value.length > 140 ? value.substring(0, 137) + "\u2026" : value

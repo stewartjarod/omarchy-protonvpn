@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Tear down the torrent tunnel. The WireGuard interface is deleted explicitly
+# first: a namespace whose name is removed lives on while a process (a running
+# qBittorrent) is still inside it, and so would its tunnel. Deleting the
+# interface leaves such a process with only loopback.
+set -euo pipefail
+. /usr/local/lib/pvpn-torrent/common.sh
+ip -n "$NS" link del "$WG_IF" 2>/dev/null || true
+ip netns del "$NS" 2>/dev/null || true
+ip link del "$WG_IF" 2>/dev/null || true
+rm -f "$RUN_DIR/status" "$RUN_DIR/port"
+echo "[pvpn-torrent] namespace $NS torn down"

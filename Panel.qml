@@ -216,12 +216,39 @@ Panel {
   readonly property int visibleCountryCount: root.serversExpanded ? countryRows.length : 0
   readonly property int serversOffset: favoriteRows.length
   readonly property int infoOffset: serversOffset + visibleCountryCount
-  readonly property int actionsOffset: infoOffset + infoRows.length
+  readonly property int torrentOffset: infoOffset + infoRows.length
+  readonly property int actionsOffset: torrentOffset + torrentRows.length
+
+  // Torrent tunnel rows; empty (section hidden) until system/install.sh ran.
+  function buildTorrentRows() {
+    var rows = []
+    if (!service || !service.torrentInstalled) return rows
+    var st = service.torrentStatus || {}
+    var server = st.server || ""
+    var tunnelHint = service.torrentBusy ? "\u2026" : (service.torrentUp ? "On" + (server ? " \u00b7 " + server : "") : "Off")
+    rows.push({ action: "toggleTorrent", label: "Torrent tunnel", hint: tunnelHint })
+    if (service.torrentUp) {
+      var portHint = st.port_ok === "1" && st.port
+        ? st.port + (st.qbt_port === st.port ? " \u00b7 in qBittorrent" : "")
+        : (st.port_error ? "unavailable" : "requesting\u2026")
+      rows.push({ action: st.port ? "copyPort" : "none", label: "Forwarded port", hint: portHint })
+      rows.push({ action: "none", label: "Handshake", hint: Model.formatAgo(st.handshake, Date.now()) })
+    }
+    var q = service.qbtState
+    var qbtHint = q === "inside" ? "running in tunnel"
+      : q === "outside" ? "OUTSIDE tunnel \u2014 quit it"
+      : q === "stale" ? "old tunnel \u2014 restart it"
+      : (service.torrentUp ? "open" : "tunnel off")
+    rows.push({ action: "openQbt", label: "qBittorrent", hint: qbtHint })
+    return rows
+  }
+  readonly property var torrentRows: buildTorrentRows()
   readonly property var cursorRows: {
     var rows = []
     for (var f = 0; f < favoriteRows.length; f++) rows.push(favoriteRows[f])
     for (var c = 0; c < root.visibleCountryCount; c++) rows.push(countryRows[c])
     for (var i = 0; i < infoRows.length; i++) rows.push(infoRows[i])
+    for (var t = 0; t < torrentRows.length; t++) rows.push(torrentRows[t])
     for (var j = 0; j < actionRows.length; j++) rows.push(actionRows[j])
     return rows
   }
@@ -313,6 +340,9 @@ Panel {
     if (action === "refresh") { service.refresh(); service.refreshServerList() }
     else if (action === "copyIp") service.copyText(service.tunnelIp)
     else if (action === "copyServer") service.copyText(serverLabel)
+    else if (action === "toggleTorrent") service.setTorrentTunnel(!service.torrentUp)
+    else if (action === "copyPort") service.copyText(String((service.torrentStatus || {}).port || ""))
+    else if (action === "openQbt") service.openQbittorrent()
     else if (action === "toggleCountry") { expandedCity = ""; expandedCountry = expandedCountry === value ? "" : value }
     else if (action === "toggleCity") {
       var same = expandedCountry === value.country && expandedCity === value.city
@@ -674,6 +704,38 @@ Panel {
                   label: modelData.label
                   hint: modelData.hint
                   rowIndex: root.infoOffset + index
+                  actionName: modelData.action
+                }
+              }
+            }
+          }
+
+          Column {
+            width: parent.width
+            spacing: Style.space(2)
+            visible: root.torrentRows.length > 0
+
+            PanelSectionHeader {
+              text: "TORRENTS"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Repeater {
+              model: root.torrentRows
+
+              delegate: Item {
+                required property var modelData
+                required property int index
+                width: parent.width
+                height: cursorRow.implicitHeight
+
+                CursorRow {
+                  id: cursorRow
+                  width: parent.width
+                  label: modelData.label
+                  hint: modelData.hint
+                  rowIndex: root.torrentOffset + index
                   actionName: modelData.action
                 }
               }

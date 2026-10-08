@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# ============================================================================
+#  /usr/local/bin/qbittorrent - keeps qBittorrent inside the torrent tunnel.
+#
+#  /usr/local/bin comes before /usr/bin in PATH, so `qbittorrent` from a
+#  terminal, the app launcher, or a magnet link lands here:
+#    * already inside the tunnel's namespace -> run the real binary
+#    * outside it                            -> relaunch inside via sudo
+#    * tunnel not running                    -> refuse, with an explanation
+#  To deliberately bypass it, run /usr/bin/qbittorrent.
+# ============================================================================
+set -uo pipefail
+. /usr/local/lib/pvpn-torrent/common.sh
+REAL="/usr/bin/qbittorrent"
+
+# Same namespace inode as the tunnel's = already inside. Kernel ground truth.
+in_tunnel() {
+  local mine theirs
+  mine=$(stat -Lc '%i' /proc/self/ns/net 2>/dev/null) || return 1
+  theirs=$(stat -Lc '%i' "/run/netns/$NS" 2>/dev/null) || return 1
+  [[ -n "$mine" && "$mine" == "$theirs" ]]
+}
+
+in_tunnel && exec "$REAL" "$@"
+
+if ! ns_exists; then
+  msg="qBittorrent was NOT started: the torrent tunnel is not running.
+Start it from the Proton VPN panel, or: sudo systemctl start pvpn-torrent.service"
+  echo "$msg" >&2
+  command -v notify-send >/dev/null && notify-send --app-name="Proton VPN" --urgency=critical "qBittorrent not started" "The torrent tunnel is not running." 2>/dev/null
+  exit 1
+fi
+
+exec sudo -n /usr/local/bin/pvpn-torrent-launch "$@"

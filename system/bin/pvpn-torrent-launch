@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# ============================================================================
+#  pvpn-torrent-launch - start qBittorrent INSIDE the torrent tunnel.
+#
+#  Entering a namespace needs root, so this is allowed passwordless via
+#  /etc/sudoers.d/90-pvpn-torrent. It is written to be safe to grant:
+#    * the binary is HARDCODED (/usr/bin/qbittorrent); callers can't swap it
+#    * privileges drop to the desktop user with runuser BEFORE exec
+#    * arguments (magnet links, .torrent files) only reach that user process
+#    * it refuses to run when the tunnel is down (fail closed)
+# ============================================================================
+set -euo pipefail
+. /usr/local/lib/pvpn-torrent/common.sh
+BIN="/usr/bin/qbittorrent"
+
+[[ -x "$BIN" ]] || { echo "pvpn-torrent-launch: $BIN not found" >&2; exit 1; }
+[[ -n "$TARGET_USER" && -n "${TARGET_UID:-}" ]] || { echo "pvpn-torrent-launch: TARGET_USER not set in /etc/pvpn-torrent/torrent.conf" >&2; exit 1; }
+
+if ! ns_exists; then
+  echo "pvpn-torrent-launch: torrent tunnel is not running (sudo systemctl start pvpn-torrent.service)" >&2
+  exit 1
+fi
+if ! ip netns exec "$NS" ip route show default 2>/dev/null | grep -q .; then
+  echo "pvpn-torrent-launch: torrent tunnel is DOWN - refusing to start qBittorrent" >&2
+  exit 1
+fi
+
+# A network namespace isolates networking only; the Wayland and D-Bus sockets
+# are filesystem sockets, so the GUI works. sudo keeps WAYLAND_DISPLAY (see the
+# sudoers file); fall back to the first compositor socket if it's missing.
+RUNDIR="/run/user/$TARGET_UID"
+WL="${WAYLAND_DISPLAY:-}"
+if [[ -z "$WL" || ! -S "$RUNDIR/$WL" ]]; then
+  WL=""
+  for s in "$RUNDIR"/wayland-[0-9]*; do
+    [[ -S "$s" ]] && { WL=$(basename "$s"); break; }
+  done
+fi
+HOME_DIR="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
+
+ENVV=(
+  XDG_RUNTIME_DIR="$RUNDIR"
+  DBUS_SESSION_BUS_ADDRESS="unix:path=$RUNDIR/bus"
+  QT_QPA_PLATFORM="wayland;xcb"
+  HOME="$HOME_DIR"
+  USER="$TARGET_USER"
+  LOGNAME="$TARGET_USER"
+  PATH="/usr/local/bin:/usr/bin"
+)
+[[ -n "$WL" ]] && ENVV+=(WAYLAND_DISPLAY="$WL")
+for v in DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE QT_QPA_PLATFORMTHEME QT_STYLE_OVERRIDE \
+         XCURSOR_THEME XCURSOR_SIZE GTK_THEME HYPRLAND_INSTANCE_SIGNATURE; do
+  [[ -n "${!v:-}" ]] && ENVV+=("$v=${!v}")
+done
+
+cd "$HOME_DIR" 2>/dev/null || cd /
+exec ip netns exec "$NS" runuser -u "$TARGET_USER" -- env "${ENVV[@]}" "$BIN" "$@"

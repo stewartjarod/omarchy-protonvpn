@@ -100,6 +100,52 @@ o.bind("SUPER + CTRL + U", "Proton VPN", "omarchy-shell -q tharin.protonvpn armT
 
 Use `armSearch` instead of `armToggle` to open straight into search.
 
+## Torrent tunnel (optional)
+
+A second Proton WireGuard tunnel just for qBittorrent, independent of the
+desktop VPN (based on the design in
+[ralphk-86/omarchy-proton](https://github.com/ralphk-86/omarchy-proton)):
+
+- The tunnel lives in its own network namespace (`pvpntor`) whose only way out
+  is the tunnel: its own DNS, and a default-deny firewall. If the tunnel is
+  down, qBittorrent has no network at all, so it can't leak.
+- qBittorrent always starts inside it. A `qbittorrent` wrapper in
+  `/usr/local/bin` covers the launcher, magnet links and the terminal, and
+  refuses to start when the tunnel is down.
+- Toggling or switching the desktop VPN never touches torrents. The tunnel's
+  packets bypass the desktop VPN instead of nesting inside it.
+- A Proton NAT-PMP port is kept open and set as qBittorrent's listening port
+  automatically (through its WebUI, reachable only inside the namespace).
+  qBittorrent is also bound to the tunnel interface, so if it is ever started
+  outside, it gets no network.
+- The panel gets a TORRENTS section: tunnel on/off, server, forwarded port,
+  last handshake, and whether qBittorrent is inside the tunnel. The bar icon
+  warns if qBittorrent is ever found running outside it.
+
+### Install
+
+1. Download a config: account.protonvpn.com → Downloads → WireGuard
+   configuration → GNU/Linux, pick a **P2P** server, turn **NAT-PMP (Port
+   Forwarding)** on. Each config is its own Proton session; don't reuse it
+   elsewhere.
+2. Quit qBittorrent.
+3. Run:
+
+   ```bash
+   sudo ./system/install.sh ~/Downloads/<config>.conf --qbt-config
+   ```
+
+   This installs the scripts, `pvpn-torrent.service` (enabled at boot), the
+   sudoers rules for starting/stopping the tunnel and launching qBittorrent
+   in it (validated with `visudo` first), and a launcher override.
+   `--qbt-config` enables qBittorrent's WebUI on 127.0.0.1:8080 with
+   localhost auth bypass, so the port can be set (a backup is kept).
+4. Start qBittorrent from the launcher or the panel.
+
+To change server, re-run step 3 with another config. To remove:
+`sudo /usr/local/lib/pvpn-torrent/uninstall.sh` (`--purge` also deletes
+`/etc/pvpn-torrent`).
+
 ## Settings
 
 | Key                  | Type    | Default | Meaning                        |
