@@ -32,6 +32,13 @@ Panel {
   readonly property bool hasError: service && service.lastError !== ""
   readonly property string heroMeta: service ? (service.connected ? "Connected" : "Disconnected") : "Proton VPN"
   readonly property bool vpnOn: service && service.connected
+  // Connected: the server. Disconnected: where the switch / enter will go.
+  readonly property string heroDetail: {
+    if (!service) return ""
+    if (vpnOn) return service.serverName
+    var d = service.describeTarget(service.lastTarget)
+    return d ? "\u23ce " + d.label : ""
+  }
   readonly property string statusText: {
     if (!service) return ""
     if (service.actionStatus !== "") return service.actionStatus
@@ -89,16 +96,19 @@ Panel {
     if (focusSection === "rows" && selectedIndex >= favorites.length)
       selectedIndex += next.length - favorites.length
     _favoritesLocal = next
-    persistFavorites(next)
+    persistState()
     clampSelection()
   }
 
-  function persistFavorites(next) {
+  // Writes favorites and the last connect target together so one save can't
+  // roll back the other before the shell has re-read the entry.
+  function persistState() {
     if (!root.bar || !root.bar.shell || typeof root.bar.shell.updateEntryInline !== "function") return
     var settings = service && service.settings ? service.settings : {}
     var entry = { id: root.moduleName }
     for (var key in settings) if (key !== "id") entry[key] = settings[key]
-    entry.favorites = next
+    entry.favorites = favorites
+    if (service && service.lastTarget) entry.lastTarget = service.lastTarget
     root.bar.shell.updateEntryInline(root.moduleName, entry)
   }
 
@@ -120,6 +130,7 @@ Panel {
     ignoreUnknownSignals: true
     function onFilterChanged() { root.expandedCountry = ""; root.expandedCity = "" }
     function onConnectSucceeded() { root.showTunnel() }
+    function onTargetUsed(target) { root.persistState() }
   }
 
   readonly property bool headerHasCursor: cursorActive && focusSection === "header"
@@ -170,7 +181,8 @@ Panel {
         if (!open) return
         countries.push({ action: "connectServer", value: row.code, label: ind1 + "Fastest in " + row.name, hint: "" })
         var cities = service.cityRows(row.code)
-        for (var j = 0; j < cities.length; j++) pushCity(row.code, cities[j].name, cities[j].name, cities[j].hint, ind1)
+        for (var j = 0; j < cities.length; j++)
+          pushCity(row.code, cities[j].name, cities[j].name + (cities[j].region ? ", " + cities[j].region : ""), cities[j].hint, ind1)
       }
 
       countries.push({ action: "cycleFilter", value: "", label: "Type", hint: root.filterLabel + "  \u00b7  change" })
@@ -179,7 +191,7 @@ Panel {
         for (var a = 0; a < found.countries.length; a++) pushCountry(found.countries[a])
         for (var b = 0; b < found.cities.length; b++) {
           var c = found.cities[b]
-          pushCity(c.country, c.name, c.name + ", " + c.countryName, c.hint, "")
+          pushCity(c.country, c.name, c.name + ", " + (c.regionName || c.countryName), c.hint, "")
         }
         for (var n = 0; n < found.servers.length; n++) {
           var sv = found.servers[n]
@@ -294,13 +306,13 @@ Panel {
 
   function runAction(action, value) {
     if (!service) return
+    if (action === "connectServer" || action === "connectCity" || action === "connectName" || action === "connectFavorite") {
+      runConnect(action, value)
+      return
+    }
     if (action === "refresh") { service.refresh(); service.refreshServerList() }
     else if (action === "copyIp") service.copyText(service.tunnelIp)
     else if (action === "copyServer") service.copyText(serverLabel)
-    else if (action === "connectServer") service.connectServer(value, "", "")
-    else if (action === "connectCity") service.connectServer(value.country, value.city, "")
-    else if (action === "connectName") service.connectServer("", "", value)
-    else if (action === "connectFavorite") connectFavorite(value)
     else if (action === "toggleCountry") { expandedCity = ""; expandedCountry = expandedCountry === value ? "" : value }
     else if (action === "toggleCity") {
       var same = expandedCountry === value.country && expandedCity === value.city
@@ -325,6 +337,16 @@ Panel {
     if (panelFlick) panelFlick.contentY = 0
   }
 
+  // Connecting from the list folds it away right away; the status line shows
+  // progress (or the error) above the tunnel details.
+  function runConnect(action, value) {
+    if (action === "connectServer") service.connectServer(value, "", "")
+    else if (action === "connectCity") service.connectServer(value.country, value.city, "")
+    else if (action === "connectName") service.connectServer("", "", value)
+    else connectFavorite(value)
+    showTunnel()
+  }
+
   function toggleServers() {
     serversExpanded = !serversExpanded
   }
@@ -347,9 +369,15 @@ Panel {
       searchQuery = ""
       _favoritesLocal = null
       if (service) service.refreshServerList()
-      if (Model.consumeSearchRequest(Date.now())) {
+      var mode = Model.consumeOpenMode(Date.now())
+      if (mode === "search") {
         serversExpanded = true
         searchFocusTimer.restart()
+      } else if (mode === "toggle") {
+        // Cursor on the on/off switch: enter connects to the last target or
+        // disconnects.
+        cursorActive = true
+        focusSection = "header"
       }
     }
   }
@@ -430,7 +458,7 @@ Panel {
               width: parent.width
               title: "Proton VPN"
               meta: root.heroMeta
-              detail: root.vpnOn && root.service && root.service.serverName ? root.service.serverName : ""
+              detail: root.heroDetail
               foreground: root.foreground
               fontFamily: root.fontFamily
               iconOpacity: root.vpnOn ? 1.0 : 0.5
@@ -572,7 +600,7 @@ Panel {
               visible: root.serversExpanded
               width: parent.width
               foreground: root.foreground
-              placeholderText: "Search countries, cities, servers  (/)"
+              placeholderText: "Search countries, states, cities, servers  (/)"
               text: root.searchQuery
               onTextChanged: {
                 if (root.searchQuery === text) return

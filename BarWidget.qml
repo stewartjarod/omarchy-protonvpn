@@ -73,8 +73,9 @@ BarWidget {
     function show() { root.open() }
     function hide() { root.close() }
     function toggle() { root.togglePanel() }
-    // Arms "open into search" for the next panel open; see Model.requestSearch.
-    function armSearch() { Model.requestSearch(Date.now()) }
+    // Arm how the next panel open starts; see Model.requestOpenMode.
+    function armSearch() { Model.requestOpenMode("search", Date.now()) }
+    function armToggle() { Model.requestOpenMode("toggle", Date.now()) }
     function status(): string { return vpn.statusText }
   }
 

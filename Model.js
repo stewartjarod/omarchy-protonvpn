@@ -8,20 +8,48 @@
 var _lastNotifiedTransition = { connected: false, at: 0 }
 var _notifyDedupeWindowMs = 45000
 
-// "Open straight into search" request from the hotkey. The hotkey arms it
-// over IPC, then summons the panel through the shell (which picks the
-// focused monitor); the panel that opens consumes it. Expires quickly so a
-// later plain click never lands in search.
-var _searchRequestAt = 0
+// How the next panel open should start ("toggle" = cursor on the on/off
+// switch, "search" = search field focused). A hotkey arms it over IPC, then
+// summons the panel through the shell (which picks the focused monitor); the
+// panel that opens consumes it. Expires quickly so a later plain click opens
+// normally.
+var _openMode = ""
+var _openModeAt = 0
 
-function requestSearch(now) {
-  _searchRequestAt = now
+function requestOpenMode(mode, now) {
+  _openMode = mode
+  _openModeAt = now
 }
 
-function consumeSearchRequest(now) {
-  var armed = _searchRequestAt > 0 && now - _searchRequestAt < 1500
-  _searchRequestAt = 0
-  return armed
+function consumeOpenMode(now) {
+  var mode = _openModeAt > 0 && now - _openModeAt < 1500 ? _openMode : ""
+  _openMode = ""
+  _openModeAt = 0
+  return mode
+}
+
+// Proton has no region field; US server names carry the state ("US-CO#54").
+var US_STATES = {
+  AL: "Alabama", AK: "Alaska", AZ: "Arizona", AR: "Arkansas", CA: "California",
+  CO: "Colorado", CT: "Connecticut", DE: "Delaware", DC: "District of Columbia",
+  FL: "Florida", GA: "Georgia", HI: "Hawaii", ID: "Idaho", IL: "Illinois",
+  IN: "Indiana", IA: "Iowa", KS: "Kansas", KY: "Kentucky", LA: "Louisiana",
+  ME: "Maine", MD: "Maryland", MA: "Massachusetts", MI: "Michigan",
+  MN: "Minnesota", MS: "Mississippi", MO: "Missouri", MT: "Montana",
+  NE: "Nebraska", NV: "Nevada", NH: "New Hampshire", NJ: "New Jersey",
+  NM: "New Mexico", NY: "New York", NC: "North Carolina", ND: "North Dakota",
+  OH: "Ohio", OK: "Oklahoma", OR: "Oregon", PA: "Pennsylvania",
+  RI: "Rhode Island", SC: "South Carolina", SD: "South Dakota", TN: "Tennessee",
+  TX: "Texas", UT: "Utah", VT: "Vermont", VA: "Virginia", WA: "Washington",
+  WV: "West Virginia", WI: "Wisconsin", WY: "Wyoming"
+}
+
+// State code for a US server, or "". Secure Core names are entry-exit
+// ("CH-US#1"), so only names whose prefix is the exit country count.
+function usStateCode(server) {
+  if (!server || server.ExitCountry !== "US") return ""
+  var m = /^US-([A-Z]{2})#/.exec(String(server.Name || ""))
+  return m && US_STATES[m[1]] ? m[1] : ""
 }
 
 function shouldNotifyTransition(connected, now) {
@@ -200,8 +228,9 @@ function cityRows(parsed, filterKey, country) {
     if (!s || Number(s.Status) !== 1 || String(s.ExitCountry || "").toUpperCase() !== country || !pred(s)) continue
     var name = stripMarkup(s.City || "Other")
     var load = Number(s.Load)
-    if (!byCity[name]) byCity[name] = { name: name, count: 0, bestLoad: load }
+    if (!byCity[name]) byCity[name] = { name: name, region: usStateCode(s), count: 0, bestLoad: load }
     byCity[name].count += 1
+    if (!byCity[name].region) byCity[name].region = usStateCode(s)
     if (isFinite(load) && load < byCity[name].bestLoad) byCity[name].bestLoad = load
   }
   var rows = []
@@ -268,9 +297,11 @@ function searchRows(parsed, filterKey, query, countries, countryNames, limit) {
     var code = String(s.ExitCountry || "").toUpperCase()
     var city = stripMarkup(s.City || "")
     var load = Number(s.Load)
-    if (city && _norm(city).indexOf(q) !== -1) {
+    var region = usStateCode(s)
+    var regionHit = region !== "" && (_norm(US_STATES[region]).indexOf(q) !== -1 || _norm(region) === q)
+    if (city && (_norm(city).indexOf(q) !== -1 || regionHit)) {
       var key = code + "|" + city
-      if (!cities[key]) cities[key] = { country: code, name: city, countryName: (countryNames && countryNames[code]) ? stripMarkup(countryNames[code]) : code, count: 0, bestLoad: load }
+      if (!cities[key]) cities[key] = { country: code, name: city, region: region, regionName: region ? US_STATES[region] : "", countryName: (countryNames && countryNames[code]) ? stripMarkup(countryNames[code]) : code, count: 0, bestLoad: load }
       cities[key].count += 1
       if (isFinite(load) && load < cities[key].bestLoad) cities[key].bestLoad = load
     }
@@ -293,6 +324,16 @@ function searchRows(parsed, filterKey, query, countries, countryNames, limit) {
 // Favorites are { kind: "country" | "city" | "server", country, city, name,
 // filter }. Country/city favorites remember the type filter they were saved
 // under ("P2P in Netherlands"); servers are specific already.
+// A connect target is { code, city, name, filter } as passed to
+// Service.connectServer; describe it with the favorite helpers.
+function targetAsFavorite(t) {
+  if (!t) return null
+  if (t.name) return { kind: "server", name: t.name, country: t.code || "" }
+  if (t.city) return { kind: "city", country: t.code, city: t.city, filter: t.filter || "all" }
+  if (t.code) return { kind: "country", country: t.code, filter: t.filter || "all" }
+  return { kind: "any", filter: t.filter || "all" }
+}
+
 function favoriteKey(fav) {
   if (!fav) return ""
   if (fav.kind === "server") return "server:" + fav.name
@@ -316,6 +357,7 @@ function describeFavorite(parsed, fav, countryNames) {
     }
     return { label: fav.name, hint: hint || countryName }
   }
+  if (fav.kind === "any") return { label: "Fastest " + (filterLabel(fav.filter || "all") === "All" ? "" : filterLabel(fav.filter) + " ") + "server", hint: "" }
   if (fav.kind === "city") {
     var cities = cityRows(parsed, fav.filter || "all", fav.country).filter(function(r) { return r.name === fav.city })
     return { label: fav.city + ", " + countryName, hint: typeSuffix + (cities.length ? cities[0].bestLoad + "% load" : "unavailable") }

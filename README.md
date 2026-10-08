@@ -19,7 +19,8 @@ Status and one-click fastest-server connection for Proton VPN in the menu bar.
     press `f` or click the "Type" row to cycle): All, Free, Plus, P2P,
     Streaming, Secure Core, Tor. Types your plan can't use are hidden.
   - Search box at the top of the list (`/` to focus): matches countries,
-    cities and server names (e.g. `japan`, `zurich`, `nl#38`) within the
+    cities, US states and server names (e.g. `japan`, `zurich`, `texas`,
+    `nl#38`) within the
     selected type. `Esc` returns to the list with the query kept, so `j`/`k`,
     `b` and `enter` work on the results.
   - Favorites: star any country, city or server (click the star or press `b`)
@@ -85,13 +86,19 @@ omarchy-shell shell rescanPlugins
 
 ## Hotkey
 
-To toggle the panel and land straight in server search, bind both IPC calls
-(arm search, then let the shell open the panel on the focused monitor). In
-`~/.config/hypr/bindings.lua`:
+Plain connect (the switch, right click, or enter on the switch) goes back to
+the last thing you connected to: a specific server, or "fastest in" the
+country/city and type you picked. With no history it uses the fastest server.
+
+To open the panel with the cursor on the on/off switch (enter reconnects or
+disconnects, `/` searches), arm the open mode and let the shell open the panel
+on the focused monitor. In `~/.config/hypr/bindings.lua`:
 
 ```lua
-o.bind("SUPER + CTRL + U", "Proton VPN search", "omarchy-shell -q tharin.protonvpn armSearch; omarchy-shell shell toggle tharin.protonvpn")
+o.bind("SUPER + CTRL + U", "Proton VPN", "omarchy-shell -q tharin.protonvpn armToggle; omarchy-shell shell toggle tharin.protonvpn")
 ```
+
+Use `armSearch` instead of `armToggle` to open straight into search.
 
 ## Settings
 

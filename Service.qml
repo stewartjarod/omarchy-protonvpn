@@ -36,6 +36,22 @@ Item {
   signal filterChanged()
   // Fires once a requested connection is confirmed by a status poll.
   signal connectSucceeded()
+  // Fires when a connect target is used so the panel can persist it
+  // (settings.lastTarget) for the next plain connect.
+  signal targetUsed(var target)
+
+  // Last place we connected to, { code, city, name, filter }. Plain connect
+  // (switch, right click, hotkey + enter) goes back there instead of
+  // "fastest anywhere". The local copy wins over the saved setting until the
+  // shell has written it back.
+  property var _lastTargetLocal: null
+  readonly property var lastTarget: {
+    if (_lastTargetLocal) return _lastTargetLocal
+    var t = settings ? settings.lastTarget : null
+    if (!t || typeof t !== "object") return null
+    return { code: t.code || "", city: t.city || "", name: t.name || "", filter: t.filter || "all" }
+  }
+  function describeTarget(t) { return t ? Model.describeFavorite(_parsedList, Model.targetAsFavorite(t), _countryNames) : null }
   property bool refreshing: false
   property bool toggling: false
   // True from a connect request until the CLI returns; drives the bar's
@@ -137,6 +153,10 @@ Item {
   function connectServer(code, city, name, filterKey) {
     if (toggling) return
     var filter = filterKey || serverFilter
+    var target = { code: code || "", city: city || "", name: name || "", filter: filter }
+    _lastTargetLocal = target
+    targetUsed(target)
+    _desiredConnected = 1
     var args = ["protonvpn", "connect"]
     var flag = Model.filterFlag(filter)
     if (name) {
@@ -253,6 +273,10 @@ Item {
 
   function connect() {
     if (toggling || connected) return
+    if (lastTarget) {
+      connectServer(lastTarget.code, lastTarget.city, lastTarget.name, lastTarget.filter)
+      return
+    }
     toggling = true
     connecting = true
     lastError = ""
