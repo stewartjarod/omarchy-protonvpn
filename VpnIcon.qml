@@ -15,10 +15,10 @@ Item {
   property bool connected: false
   property bool connecting: false
   property bool warning: false
-  // Torrent tunnel health badge, top-right: "ok" = accent download arrow,
-  // "error" = urgent "!", "off" = none.
+  // Torrent tunnel health, drawn inside the shield: "ok" = down arrow in the
+  // icon colour (full strength even when the shield is faded), "error" = "!"
+  // in the badge colour, "off" = empty shield.
   property string torrentState: "off"
-  property color torrentColor: Color.accent
   property real disconnectedOpacity: 0.4
 
   width: iconSize
@@ -62,6 +62,22 @@ Item {
       }
     }
 
+    // Torrent tunnel glyph in the shield's hollow centre (16x16 units).
+    Shape {
+      anchors.fill: parent
+      visible: !root.connecting && (root.torrentState === "ok" || root.torrentState === "error")
+      preferredRendererType: Shape.CurveRenderer
+      ShapePath {
+        strokeWidth: -1
+        fillColor: root.torrentState === "error" ? root.badgeColor : root.color
+        PathSvg {
+          path: root.torrentState === "error"
+            ? "M 7.2 3.4 h 1.6 v 3.9 h -1.6 z M 7.2 8.1 h 1.6 v 1.5 h -1.6 z"
+            : "M 7.3 3.4 h 1.4 v 2.7 h 2 l -2.7 3.1 l -2.7 -3.1 h 2 z"
+        }
+      }
+    }
+
     // network-vpn-acquiring-symbolic: faded shield top + plug, three dots.
     Shape {
       anchors.fill: parent
@@ -87,26 +103,6 @@ Item {
         fillColor: Qt.rgba(root.color.r, root.color.g, root.color.b, root.dotOpacity(2))
         PathSvg { path: "m 13 6 c -1.105469 0 -2 0.894531 -2 2 s 0.894531 2 2 2 s 2 -0.894531 2 -2 s -0.894531 -2 -2 -2 z" }
       }
-    }
-  }
-
-  Rectangle {
-    visible: root.torrentState === "ok" || root.torrentState === "error"
-    width: Math.max(7, parent.width * 0.46)
-    height: width
-    radius: width / 2
-    color: root.torrentState === "error" ? root.badgeColor : root.torrentColor
-    anchors.right: parent.right
-    anchors.top: parent.top
-    anchors.rightMargin: -width * 0.25
-    anchors.topMargin: -width * 0.2
-
-    Text {
-      anchors.centerIn: parent
-      text: root.torrentState === "error" ? "!" : "\u2193"
-      color: Color.background
-      font.pixelSize: Math.max(6, parent.height * 0.8)
-      font.bold: true
     }
   }
 
