@@ -235,7 +235,9 @@ Panel {
       rows.push({ action: "none", label: "Handshake", hint: Model.formatAgo(st.handshake, Date.now()) })
     }
     var q = service.qbtState
-    var qbtHint = q === "inside" ? "running in tunnel"
+    // Inside the namespace with the tunnel off = no network at all (it comes
+    // back on its own when the tunnel does).
+    var qbtHint = q === "inside" ? (service.torrentUp ? "running in tunnel" : "offline \u00b7 tunnel off")
       : q === "outside" ? "OUTSIDE tunnel \u2014 click to move"
       : q === "stale" ? "no network \u2014 click to restart"
       : (service.torrentUp ? "open" : "tunnel off")
