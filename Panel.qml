@@ -10,8 +10,8 @@ import "Model.js" as Model
 // other bar panels (j/k move, enter activates, t toggles, esc closes).
 Panel {
   id: root
-  moduleName: "tharin.protonvpn"
-  ipcTarget: "tharin.protonvpn"
+  moduleName: "jarod.protonvpn"
+  ipcTarget: "jarod.protonvpn"
   manageIpc: false // BarWidget.qml owns the single IpcHandler this target permits
 
   property var service: null

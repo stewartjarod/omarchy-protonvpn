@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "id": "tharin.protonvpn",
-  "name": "Proton VPN",
+  "id": "jarod.protonvpn",
+  "name": "Proton VPN (jarod)",
   "version": "1.2.0",
   "author": "Tharin Fernando",
   "license": "MIT",

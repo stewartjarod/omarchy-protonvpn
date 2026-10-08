@@ -10,7 +10,7 @@ import "Model.js" as Model
 // plugin's bar-widget contract so shell summon/hide/toggle routes work.
 BarWidget {
   id: root
-  moduleName: "tharin.protonvpn"
+  moduleName: "jarod.protonvpn"
 
   Service {
     id: vpn
@@ -68,7 +68,7 @@ BarWidget {
   }
 
   IpcHandler {
-    target: "tharin.protonvpn"
+    target: "jarod.protonvpn"
 
     function refresh() { root.refresh() }
     function open() { root.open() }
