@@ -13,7 +13,11 @@ Status and one-click fastest-server connection for Proton VPN in the menu bar.
   - Session uptime ("Connected for 2h 13m")
   - Live download/upload rates
   - Tunnel IP
-  - Collapsible list of free-server countries (click the header or press `s`)
+  - Collapsible server list with a type filter (click the header or press `s`;
+    press `f` or click the "Type" row to cycle): All, Free, Plus, P2P,
+    Streaming, Secure Core, Tor. Types your plan can't use are hidden.
+  - Click a country to connect to its fastest server of the selected type;
+    P2P, Secure Core and Tor also get a "Fastest ... server" row
   - Refresh action
 - Desktop notifications when the VPN connects, disconnects, or a command fails
   (goes through the shell's notification daemon, so do-not-disturb applies).
@@ -21,7 +25,7 @@ Status and one-click fastest-server connection for Proton VPN in the menu bar.
   instantly (optimistically) and reconciles with the real VPN state.
 - Right click connects to the fastest eligible Proton server or disconnects.
 - Middle click refreshes status.
-- Keyboard navigation: `j`/`k`, `enter`, `t`, `c`, `s`, `r`, and `esc`.
+- Keyboard navigation: `j`/`k`, `enter`, `t`, `c`, `s`, `f`, `r`, and `esc`.
 
 ## Backend
 

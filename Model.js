@@ -106,12 +106,71 @@ function parseCountriesOutput(text) {
 // Projects Proton's cached logical server list into a compact country list.
 // Tier 0 is Proton's Free tier; offline logical servers are omitted.
 function freeCountryRows(raw, countryNames) {
+  return (serverListRows(raw, countryNames).free) || []
+}
+
+// Proton's `Features` bitmask on a logical server.
+var FEATURE_SECURE_CORE = 1
+var FEATURE_TOR = 2
+var FEATURE_P2P = 4
+var FEATURE_STREAMING = 8
+
+// Server-type filters offered in the panel. `flag` is the matching
+// `protonvpn connect` option, when the CLI has one.
+var SERVER_FILTERS = [
+  { key: "all", label: "All", flag: "" },
+  { key: "free", label: "Free", flag: "" },
+  { key: "plus", label: "Plus", flag: "" },
+  { key: "p2p", label: "P2P", flag: "--p2p" },
+  { key: "streaming", label: "Streaming", flag: "" },
+  { key: "securecore", label: "Secure Core", flag: "--securecore" },
+  { key: "tor", label: "Tor", flag: "--tor" }
+]
+
+function filterFlag(key) {
+  for (var i = 0; i < SERVER_FILTERS.length; i++) if (SERVER_FILTERS[i].key === key) return SERVER_FILTERS[i].flag
+  return ""
+}
+
+function hasFeature(server, bit) {
+  return (Number(server.Features) & bit) !== 0
+}
+
+// Parses the cached server list once and projects it into one country list
+// per server-type filter. Only servers the account's plan can reach
+// (Tier <= MaxTier from the same file) are listed, except Free which is
+// always tier 0.
+function serverListRows(raw, countryNames) {
+  var out = {}
+  var parsed
+  try {
+    parsed = JSON.parse(String(raw || ""))
+  } catch (e) {
+    return out
+  }
+  var logicals = parsed.LogicalServers || []
+  var maxTier = Number(parsed.MaxTier)
+  if (!isFinite(maxTier)) maxTier = 0
+  var reachable = function(s) { return Number(s.Tier) <= maxTier }
+  var preds = {
+    all: reachable,
+    free: function(s) { return Number(s.Tier) === 0 },
+    plus: function(s) { return Number(s.Tier) >= 1 && reachable(s) },
+    p2p: function(s) { return reachable(s) && hasFeature(s, FEATURE_P2P) },
+    streaming: function(s) { return reachable(s) && hasFeature(s, FEATURE_STREAMING) },
+    securecore: function(s) { return reachable(s) && hasFeature(s, FEATURE_SECURE_CORE) },
+    tor: function(s) { return reachable(s) && hasFeature(s, FEATURE_TOR) }
+  }
+  for (var key in preds) out[key] = countryRowsWhere(logicals, countryNames, preds[key], key !== "free")
+  return out
+}
+
+function countryRowsWhere(logicals, countryNames, predicate, sortByName) {
   var result = {}
   try {
-    var logicals = JSON.parse(String(raw || "")).LogicalServers || []
     for (var i = 0; i < logicals.length; i++) {
       var server = logicals[i]
-      if (!server || Number(server.Tier) !== 0 || Number(server.Status) !== 1) continue
+      if (!server || Number(server.Status) !== 1 || !predicate(server)) continue
       var code = String(server.ExitCountry || "").toUpperCase()
       if (!code) continue
       if (!result[code]) {
@@ -136,7 +195,7 @@ function freeCountryRows(raw, countryNames) {
     rows.push(row)
   }
   rows.sort(function(a, b) {
-    if (a.bestLoad !== b.bestLoad) return a.bestLoad - b.bestLoad
+    if (!sortByName && a.bestLoad !== b.bestLoad) return a.bestLoad - b.bestLoad
     return a.name.localeCompare(b.name)
   })
   return rows

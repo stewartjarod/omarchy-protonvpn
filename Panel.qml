@@ -47,7 +47,13 @@ Panel {
   property string focusSection: "header"
   property int selectedIndex: 0
   property bool cursorActive: false
-  property bool freeServersExpanded: false
+  property bool serversExpanded: false
+  readonly property string filterLabel: {
+    if (!service) return ""
+    var list = Model.SERVER_FILTERS
+    for (var i = 0; i < list.length; i++) if (list[i].key === service.serverFilter) return list[i].label
+    return ""
+  }
 
   readonly property bool headerHasCursor: cursorActive && focusSection === "header"
 
@@ -62,11 +68,13 @@ Panel {
     if (service && service.protocol !== "") info.push({ action: "none", label: "Protocol", hint: service.protocol })
     if (service && service.serverLoad !== "") info.push({ action: "none", label: "Server load", hint: service.serverLoad })
     if (service && service.connectedUptime !== "") info.push({ action: "none", label: "Connected for", hint: service.connectedUptime })
-    if (service && service.freeCountries) {
-      for (var i = 0; i < service.freeCountries.length; i++) {
-        var country = service.freeCountries[i]
-        countries.push({ action: "connectCountry", value: country.code, label: country.name, hint: country.hint })
-      }
+    if (service && service.serverRows && service.serverRows.all && service.serverRows.all.length > 0) {
+      var rows = service.serverRows[service.serverFilter] || []
+      var anyOk = service.serverFilter !== "free" && service.serverFilter !== "plus" && service.serverFilter !== "streaming"
+      countries.push({ action: "cycleFilter", value: "", label: "Type", hint: root.filterLabel + "  \u00b7  change" })
+      if (anyOk) countries.push({ action: "connectServer", value: "", label: "Fastest " + root.filterLabel + " server", hint: "any country" })
+      for (var i = 0; i < rows.length; i++)
+        countries.push({ action: "connectServer", value: rows[i].code, label: rows[i].name, hint: rows[i].hint })
     }
     actions.push({ action: "refresh", label: "Refresh", hint: "" })
     return { info: info, countries: countries, actions: actions }
@@ -75,7 +83,7 @@ Panel {
   readonly property var infoRows: buildRows().info
   readonly property var countryRows: buildRows().countries
   readonly property var actionRows: buildRows().actions
-  readonly property int visibleCountryCount: root.freeServersExpanded ? countryRows.length : 0
+  readonly property int visibleCountryCount: root.serversExpanded ? countryRows.length : 0
   readonly property var cursorRows: {
     var rows = []
     for (var c = 0; c < root.visibleCountryCount; c++) rows.push(countryRows[c])
@@ -126,14 +134,17 @@ Panel {
     if (action === "refresh") { service.refresh(); service.refreshServerList() }
     else if (action === "copyIp") service.copyText(service.tunnelIp)
     else if (action === "copyServer") service.copyText(serverLabel)
-    else if (action === "connectCountry") service.connectCountry(value)
+    else if (action === "connectServer") service.connectServer(value)
+    else if (action === "cycleFilter") service.cycleServerFilter()
   }
 
-  function toggleFreeServers() {
-    freeServersExpanded = !freeServersExpanded
+  function toggleServers() {
+    serversExpanded = !serversExpanded
   }
 
-  onFreeServersExpandedChanged: {
+  onFreeServersExpandedChanged: clampSelection()
+
+  function clampSelection() {
     if (focusSection === "rows" && selectedIndex >= cursorRowCount)
       selectedIndex = Math.max(0, cursorRowCount - 1)
   }
@@ -143,7 +154,7 @@ Panel {
       focusSection = "header"
       selectedIndex = 0
       cursorActive = false
-      freeServersExpanded = false
+      serversExpanded = false
       if (service) service.refreshServerList()
     }
   }
@@ -170,7 +181,8 @@ Panel {
       onTextKey: function(t) {
         if (t === "t" || t === "T") { if (root.service) root.service.toggle() }
         else if (t === "c" || t === "C") { if (root.service) root.service.copyText(root.service.tunnelIp) }
-        else if (t === "s" || t === "S") root.toggleFreeServers()
+        else if (t === "s" || t === "S") root.toggleServers()
+        else if (t === "f" || t === "F") { if (root.service) root.service.cycleServerFilter() }
         else if (t === "r" || t === "R") {
           if (root.service) { root.service.refresh(); root.service.refreshServerList() }
         }
@@ -264,7 +276,7 @@ Panel {
                 anchors.left: parent.left
                 anchors.leftMargin: Style.space(2)
                 anchors.verticalCenter: parent.verticalCenter
-                text: root.freeServersExpanded ? "\u25be" : "\u25b8"
+                text: root.serversExpanded ? "\u25be" : "\u25b8"
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
@@ -276,7 +288,7 @@ Panel {
                 anchors.left: freeChevron.right
                 anchors.leftMargin: Style.space(6)
                 anchors.verticalCenter: parent.verticalCenter
-                text: "SERVERS LIST"
+                text: "SERVERS"
                 color: Qt.darker(root.foreground, 1.4)
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
@@ -290,7 +302,7 @@ Panel {
                 anchors.right: parent.right
                 anchors.rightMargin: Style.space(2)
                 anchors.verticalCenter: parent.verticalCenter
-                text: root.countryRows.length + " countries"
+                text: root.filterLabel
                 textFormat: Text.PlainText
                 color: root.dim
                 font.family: root.fontFamily
@@ -303,12 +315,12 @@ Panel {
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
-                onClicked: root.toggleFreeServers()
+                onClicked: root.toggleServers()
               }
             }
 
             Repeater {
-              model: root.freeServersExpanded ? root.countryRows : []
+              model: root.serversExpanded ? root.countryRows : []
 
               delegate: Item {
                 required property var modelData

@@ -30,6 +30,8 @@ Item {
   property string actionStatus: ""
   property string lastError: ""
   property var freeCountries: []
+  property var serverRows: ({})
+  property string serverFilter: "all"
   property bool refreshing: false
   property bool toggling: false
 
@@ -111,16 +113,37 @@ Item {
   }
 
   function applyServerList() {
-    freeCountries = Model.freeCountryRows(_serverListText, _countryNames)
+    var rows = Model.serverListRows(_serverListText, _countryNames)
+    freeCountries = rows.free || []
+    serverRows = rows
   }
 
-  function connectCountry(code) {
-    if (toggling || !code) return
+  // Connects to the fastest server in `code` (any country when empty) that
+  // matches the active server-type filter, using the CLI's feature flags
+  // where they exist (--p2p / --securecore / --tor).
+  function connectServer(code) {
+    if (toggling) return
+    var flag = Model.filterFlag(serverFilter)
+    var args = ["protonvpn", "connect"]
+    if (flag !== "") args.push(flag)
+    if (code) args.push("--country", String(code))
     toggling = true
     lastError = ""
-    actionStatus = "Connecting to fastest " + code + " server\u2026"
-    toggleProcess.command = ["protonvpn", "connect", "--country", String(code)]
+    actionStatus = "Connecting to fastest " + (flag !== "" ? serverFilter + " " : "") + "server" + (code ? " in " + code : "") + "\u2026"
+    toggleProcess.command = args
     toggleProcess.running = true
+  }
+
+  function cycleServerFilter() {
+    var list = Model.SERVER_FILTERS
+    var idx = 0
+    for (var i = 0; i < list.length; i++) if (list[i].key === serverFilter) idx = i
+    // Skip filters with nothing to show on this plan (Free always stays).
+    for (var step = 1; step <= list.length; step++) {
+      var next = list[(idx + step) % list.length]
+      var rows = serverRows[next.key]
+      if (next.key === "all" || (rows && rows.length > 0)) { serverFilter = next.key; return }
+    }
   }
 
   function refreshDevice() {
