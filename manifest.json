@@ -26,11 +26,12 @@
       {
         "key": "refreshIntervalSec",
         "type": "integer",
-        "label": "Refresh interval (seconds)",
+        "label": "Status refresh while open (seconds)",
         "min": 5,
         "max": 3600,
         "step": 5,
-        "defaultValue": 30
+        "defaultValue": 30,
+        "description": "How often the panel asks the Proton CLI for status while it is open. Closed, the plugin only samples cheap network state and runs the CLI on changes (or every 10x this, at least 5 minutes)."
       },
       {
         "key": "notificationsEnabled",

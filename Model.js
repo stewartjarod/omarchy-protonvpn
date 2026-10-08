@@ -503,3 +503,189 @@ function formatRate(bytes, seconds) {
   while (v >= 1024 && u < units.length - 1) { v /= 1024; u++ }
   return (v >= 100 ? v.toFixed(0) : v.toFixed(1)) + " " + units[u] + "/s"
 }
+
+// ===== Shared state across the per-monitor Service instances ===============
+// The bar mounts one Service per monitor and `.pragma library` state is shared
+// between them, so anything that must happen once (CLI polling, automatic
+// reconnects, connect/disconnect) goes through a leader lease and an action
+// lock kept here.
+
+var _leader = { id: "", at: 0 }
+
+// True when `id` holds (or just took) the lease. The leader renews it by
+// calling again; a dead leader's lease lapses after leaseMs.
+function claimLeader(id, now, leaseMs) {
+  if (!_leader.id || _leader.id === id || now - _leader.at > leaseMs) {
+    _leader.id = id
+    _leader.at = now
+    return true
+  }
+  return false
+}
+
+// One connect/disconnect at a time, across instances (a second `protonvpn
+// connect` racing the first is the failure to avoid).
+var _action = { busy: false, at: 0, kind: "" }
+
+function beginAction(now, kind) {
+  if (_action.busy && now - _action.at < 60000) return false
+  _action.busy = true
+  _action.at = now
+  _action.kind = kind || ""
+  return true
+}
+
+// "connect" | "disconnect" while an action runs, else "". Lets the other
+// monitor's icon pulse too.
+function actionKind(now) {
+  return _action.busy && now - _action.at < 60000 ? _action.kind : ""
+}
+
+function endAction() {
+  _action.busy = false
+}
+
+function actionBusy(now) {
+  return _action.busy && now - _action.at < 60000
+}
+
+// Latest raw CLI status + quick-state text published by the leader. Followers
+// parse the same text instead of running the CLI themselves.
+var _shared = { rev: 0, status: "", quick: "", at: 0 }
+
+function publishShared(status, quick, now) {
+  _shared = { rev: _shared.rev + 1, status: status, quick: quick, at: now }
+}
+
+function sharedSnapshot() {
+  return _shared
+}
+
+// Output of the quick-state shell snippet in Service.qml: sections introduced
+// by "##name" lines.
+function parseSections(text) {
+  var out = {}
+  var cur = ""
+  var lines = String(text || "").split("\n")
+  for (var i = 0; i < lines.length; i++) {
+    var m = /^##(\w+)\s*$/.exec(lines[i])
+    if (m) { cur = m[1]; out[cur] = []; continue }
+    if (cur && lines[i].trim() !== "") out[cur].push(lines[i])
+  }
+  return out
+}
+
+// nmcli -t -f DEVICE,TYPE,STATE dev status -> the Proton tunnel device.
+// proton0 is a wireguard link; OpenVPN shows up as a tun device, so match by
+// the Proton naming too. State must start with "connected" ("disconnected"
+// must not match).
+function parseVpnDevice(lines) {
+  for (var i = 0; i < (lines || []).length; i++) {
+    var p = lines[i].trim().split(":")
+    if (p.length < 3 || !/^connected/.test(p[2])) continue
+    if (p[1] === "wireguard" || /^(proton|pvpn)/.test(p[0])) return { device: p[0], type: p[1] }
+  }
+  return null
+}
+
+// First plain IPv4 default-route device from `ip route get 1.1.1.1`.
+function parseRouteDevice(lines) {
+  var m = /\bdev\s+(\S+)/.exec((lines || [])[0] || "")
+  return m ? m[1] : ""
+}
+
+function parseGateway(lines) {
+  var m = /^default via (\S+)/.exec((lines || [])[0] || "")
+  return m ? m[1] : ""
+}
+
+// `resolvectl dns` lines look like "Link 3 (proton0): 10.2.0.1"; return the
+// servers configured on one link.
+function parseLinkDns(lines, device) {
+  var servers = []
+  for (var i = 0; i < (lines || []).length; i++) {
+    var m = /^Link \d+ \(([^)]+)\):\s*(.*)$/.exec(lines[i])
+    if (m && m[1] === device) servers = m[2].split(/\s+/).filter(function(x) { return x !== "" })
+  }
+  return servers
+}
+
+function parseGlobalDns(lines) {
+  for (var i = 0; i < (lines || []).length; i++) {
+    var m = /^Global:\s*(.*)$/.exec(lines[i])
+    if (m) return m[1].split(/\s+/).filter(function(x) { return x !== "" })
+  }
+  return []
+}
+
+// "<device> <bytes>" lines -> { device: bytes }
+function parseRx(lines) {
+  var out = {}
+  for (var i = 0; i < (lines || []).length; i++) {
+    var p = lines[i].trim().split(/\s+/)
+    if (p.length === 2 && isFinite(Number(p[1]))) out[p[0]] = Number(p[1])
+  }
+  return out
+}
+
+// A Proton kill-switch NetworkManager profile ("pvpn-killswitch...") is active.
+function killSwitchArmed(conLines) {
+  for (var i = 0; i < (conLines || []).length; i++) if (/killswitch/i.test(conLines[i])) return true
+  return false
+}
+
+// Active Wi-Fi network from `nmcli -t -f ACTIVE,SSID,SIGNAL dev wifi`.
+function parseWifi(lines) {
+  var l = (lines || [])[0]
+  if (!l) return null
+  var p = l.split(":")
+  return p.length >= 3 ? { ssid: stripMarkup(p.slice(1, -1).join(":")), signal: Number(p[p.length - 1]) } : null
+}
+
+// "eth0 192.168.1.5/24" lines -> first address
+function parseLocalAddr(lines) {
+  var p = ((lines || [])[0] || "").trim().split(/\s+/)
+  return p.length === 2 ? { device: p[0], addr: p[1].split("/")[0] } : null
+}
+
+function parseLocal(sections) { return parseLocalAddr(sections.addr) }
+
+// Everything the panel and icon need, from one quick-state snapshot.
+function parseQuick(text) {
+  var s = parseSections(text)
+  var vpn = parseVpnDevice(s.dev)
+  var rx = parseRx(s.rx)
+  return {
+    vpnDevice: vpn ? vpn.device : "",
+    routeDevice: parseRouteDevice(s.route),
+    gateway: parseGateway(s.gw),
+    local: parseLocalAddr(s.addr),
+    wifi: parseWifi(s.wifi),
+    killSwitch: killSwitchArmed(s.con),
+    tailscale: (s.ts || []).length > 0,
+    tunnelDns: vpn ? parseLinkDns(s.dns, vpn.device) : [],
+    globalDns: parseGlobalDns(s.dns),
+    // IPv4 servers on the physical link (link-local IPv6 resolvers are noise).
+    localDns: parseLocal(s) ? parseLinkDns(s.dns, parseLocal(s).device).filter(function(x) { return x.indexOf(":") === -1 }) : [],
+    rx: vpn && rx[vpn.device] !== undefined ? rx[vpn.device] : -1
+  }
+}
+
+// Desktop VPN protection state:
+//   off        no tunnel and nothing blocking
+//   protected  tunnel up, default route through it, DNS on it, bytes flowing
+//   leaking    tunnel up but traffic or DNS is not going through it
+//   stale      tunnel up but no bytes received for 3+ minutes
+//   blocked    kill switch armed with no tunnel (traffic is being cut)
+// `cliConnected` is the CLI's own answer; `rxIdleMs` is how long the tunnel's
+// receive counter has been flat.
+function protectionState(cliConnected, q, rxIdleMs) {
+  if (!cliConnected && !q.vpnDevice) {
+    return q.killSwitch ? { state: "blocked", short: "kill switch", reason: "Kill switch is blocking traffic: the VPN is down" } : { state: "off", short: "", reason: "" }
+  }
+  if (!q.vpnDevice) return { state: "leaking", short: "no tunnel device", reason: "The CLI reports connected but no tunnel device exists" }
+  if (q.routeDevice && q.routeDevice !== q.vpnDevice) return { state: "leaking", short: "bypassing tunnel", reason: "Traffic is leaving through " + q.routeDevice + ", not the tunnel" }
+  if (q.tunnelDns.length === 0) return { state: "leaking", short: "no tunnel DNS", reason: "No DNS servers are set on the tunnel" }
+  if (rxIdleMs > 180000) return { state: "stale", short: "no traffic", reason: "Nothing received through the tunnel for 3+ minutes" }
+  return { state: "protected", short: "", reason: "" }
+}

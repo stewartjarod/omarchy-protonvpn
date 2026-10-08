@@ -31,7 +31,10 @@ Panel {
 
   readonly property bool hasError: service && service.lastError !== ""
   readonly property string heroMeta: service
-    ? (service.connected ? "Connected" : "Disconnected")
+    ? (service.protection === "blocked" ? "Blocked \u00b7 kill switch"
+        : service.protection === "leaking" ? "Connected \u00b7 not protected"
+        : service.protection === "stale" ? "Connected \u00b7 no traffic"
+        : service.connected ? "Connected" : "Disconnected")
       + (service.torrentState === "ok" ? " \u00b7 torrents on" : service.torrentState === "error" ? " \u00b7 torrent problem" : "")
     : "Proton VPN"
   readonly property bool vpnOn: service && service.connected
@@ -143,6 +146,14 @@ Panel {
   // the pointer) on every tick.
   function buildInfoRows() {
     var info = []
+    if (service && (service.connected || service.protection === "blocked")) {
+      var pi = service.protectionInfo
+      if (pi.state === "protected") info.push({ action: "none", label: "Protection", hint: "\u2713 protected" })
+      else if (pi.state !== "off") {
+        info.push({ action: "none", label: "Protection", hint: "! " + pi.short })
+        info.push({ action: "none", label: pi.reason, hint: "" })
+      }
+    }
     if (serverLabel !== "") info.push({ action: "copyServer", label: "Server", hint: serverLabel })
     if (service && service.tunnelIp !== "") info.push({ action: "copyIp", label: "Tunnel IP", hint: service.tunnelIp })
     if (service && service.rxRate !== "") info.push({ action: "none", label: "Download", hint: service.rxRate })
@@ -220,7 +231,25 @@ Panel {
   readonly property int serversOffset: favoriteRows.length
   readonly property int infoOffset: serversOffset + visibleCountryCount
   readonly property int torrentOffset: infoOffset + infoRows.length
-  readonly property int actionsOffset: torrentOffset + torrentRows.length
+  readonly property int networkOffset: torrentOffset + torrentRows.length
+  readonly property int actionsOffset: networkOffset + networkRows.length
+
+  // Local network context, plus a Tailscale note: Proton's kill switch blocks
+  // tailnet traffic and MagicDNS while it is armed.
+  function buildNetworkRows() {
+    var rows = []
+    if (!service) return rows
+    var q = service.quick
+    if (q.wifi) rows.push({ action: "none", label: "Wi\u2011Fi", hint: q.wifi.ssid + " \u00b7 " + q.wifi.signal + "%" })
+    else if (q.local) rows.push({ action: "none", label: "Interface", hint: q.local.device })
+    if (q.local) rows.push({ action: "copyText", value: q.local.addr, label: "Local IP", hint: q.local.addr })
+    if (q.gateway) rows.push({ action: "copyText", value: q.gateway, label: "Gateway", hint: q.gateway })
+    var dns = q.tunnelDns.length > 0 ? q.tunnelDns : (q.localDns.length > 0 ? q.localDns : q.globalDns)
+    if (dns.length > 0) rows.push({ action: "none", label: q.tunnelDns.length > 0 ? "DNS (tunnel)" : "DNS", hint: dns.join(", ") })
+    if (q.tailscale && q.killSwitch) rows.push({ action: "none", label: "Tailscale", hint: "kill switch may block it" })
+    return rows
+  }
+  readonly property var networkRows: buildNetworkRows()
 
   // Torrent tunnel rows; empty (section hidden) until system/install.sh ran.
   function buildTorrentRows() {
@@ -257,6 +286,7 @@ Panel {
     for (var c = 0; c < root.visibleCountryCount; c++) rows.push(countryRows[c])
     for (var i = 0; i < infoRows.length; i++) rows.push(infoRows[i])
     for (var t = 0; t < torrentRows.length; t++) rows.push(torrentRows[t])
+    for (var n = 0; n < networkRows.length; n++) rows.push(networkRows[n])
     for (var j = 0; j < actionRows.length; j++) rows.push(actionRows[j])
     return rows
   }
@@ -345,9 +375,10 @@ Panel {
       runConnect(action, value)
       return
     }
-    if (action === "refresh") { service.refresh(); service.refreshServerList() }
+    if (action === "refresh") { service.refresh(true); service.refreshServerList() }
     else if (action === "copyIp") service.copyText(service.tunnelIp)
     else if (action === "copyServer") service.copyText(serverLabel)
+    else if (action === "copyText") service.copyText(String(value || ""))
     else if (action === "toggleTorrent") service.setTorrentTunnel(!service.torrentUp)
     else if (action === "copyPort") service.copyText(String((service.torrentStatus || {}).port || ""))
     else if (action === "openQbt") service.openQbittorrent()
@@ -464,7 +495,7 @@ Panel {
         else if (t === "b" || t === "B") root.favoriteCursor()
         else if (t === "/") root.focusSearch()
         else if (t === "r" || t === "R") {
-          if (root.service) { root.service.refresh(); root.service.refreshServerList() }
+          if (root.service) { root.service.refresh(true); root.service.refreshServerList() }
         }
       }
 
@@ -505,10 +536,10 @@ Panel {
                   iconSize: Style.font.display
                   color: root.foreground
                   connected: root.vpnOn
-                  connecting: root.service ? root.service.connecting : false
+                  connecting: root.service ? root.service.connectingAny : false
                   torrentState: root.service ? root.service.torrentState : "off"
                   badgeColor: root.urgent
-                  warning: root.hasError
+                  warning: root.hasError || (root.service && (root.service.protection === "leaking" || root.service.protection === "stale" || root.service.protection === "blocked"))
                 }
               }
               trailingControl: Component {
@@ -747,6 +778,39 @@ Panel {
                   hint: modelData.hint
                   rowIndex: root.torrentOffset + index
                   actionName: modelData.action
+                }
+              }
+            }
+          }
+
+          Column {
+            width: parent.width
+            spacing: Style.space(2)
+            visible: root.networkRows.length > 0
+
+            PanelSectionHeader {
+              text: "NETWORK"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Repeater {
+              model: root.networkRows
+
+              delegate: Item {
+                required property var modelData
+                required property int index
+                width: parent.width
+                height: cursorRow.implicitHeight
+
+                CursorRow {
+                  id: cursorRow
+                  width: parent.width
+                  label: modelData.label
+                  hint: modelData.hint
+                  rowIndex: root.networkOffset + index
+                  actionName: modelData.action
+                  actionValue: modelData.value
                 }
               }
             }

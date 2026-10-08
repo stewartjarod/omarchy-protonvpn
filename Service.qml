@@ -12,6 +12,10 @@ Item {
 
   property var settings: ({})
 
+  // Set by BarWidget: true while this monitor's panel is open. Open panel =
+  // faster CLI status polling.
+  property bool panelOpen: false
+
   property bool installed: false
   property bool connected: false
   property string tunnelIp: ""
@@ -54,9 +58,31 @@ Item {
   function describeTarget(t) { return t ? Model.describeFavorite(_parsedList, Model.targetAsFavorite(t), _countryNames) : null }
   property bool refreshing: false
   property bool toggling: false
+
+  // ---- shared polling (one Service per monitor; see Model.claimLeader) ----
+  readonly property string _iid: Math.random().toString(36).slice(2, 10)
+  property bool isLeader: false
+  // Cheap, keyring-free sample of the live network state; see Model.parseQuick.
+  property var quick: Model.parseQuick("")
+  property string _lastQuickText: ""
+  property string _lastStatusStdout: ""
+  property real _lastCliAt: 0
+  property int _sharedRev: 0
+  property real _rxChangedAt: 0
+  property real _lastRx: -1
+  property int _protectionTick: 0
+  // "off" | "protected" | "leaking" | "stale" | "blocked"; see Model.protectionState.
+  readonly property var protectionInfo: {
+    _protectionTick
+    var idle = connected && _rxChangedAt > 0 ? Date.now() - _rxChangedAt : 0
+    return Model.protectionState(connected, quick, idle)
+  }
+  readonly property string protection: protectionInfo.state
   // True from a connect request until the CLI returns; drives the bar's
   // "acquiring" icon.
   property bool connecting: false
+  property bool _sharedConnect: false
+  readonly property bool connectingAny: connecting || _sharedConnect
 
   // ---- torrent tunnel (system/ install; see README) ----
   // Installed when /usr/local/bin/pvpn-torrent-launch exists. The namespace
@@ -92,12 +118,11 @@ Item {
   // to this so its knob throws immediately instead of waiting for the next
   // status poll, then reconciles with reality in applyStatus.
   readonly property bool switchOn: _desiredConnected === -1 ? connected : (_desiredConnected === 1)
-  readonly property bool busy: statusProcess.running || deviceProcess.running || deviceIpProcess.running || toggleProcess.running || whichProcess.running
+  readonly property bool busy: statusProcess.running || deviceIpProcess.running || toggleProcess.running || whichProcess.running
   readonly property string serverListPath: (Quickshell.env("HOME") || "") + "/.cache/Proton/VPN/serverlist.json"
 
   property string _statusOutput: ""
   property string _statusError: ""
-  property string _deviceOutput: ""
   property string _deviceIpOutput: ""
   property string _toggleOutput: ""
   property string _toggleError: ""
@@ -135,7 +160,11 @@ Item {
     Quickshell.execDetached(args)
   }
 
-  function refresh() {
+  // Runs the CLI status command. Only the leader polls on its own; any
+  // instance can force one after an action it started. The result is
+  // published so the other monitor's Service shows the same state without
+  // running the CLI (and touching the keyring) itself.
+  function refresh(force) {
     if (!installed) {
       if (!whichProcess.running) {
         whichProcess.command = ["which", "protonvpn"]
@@ -143,14 +172,65 @@ Item {
       }
       return
     }
+    if (!force && !isLeader) return
     if (!statusProcess.running) {
       refreshing = true
       _statusOutput = ""
       _statusError = ""
+      _lastCliAt = Date.now()
       statusProcess.command = ["protonvpn", "status"]
       statusProcess.running = true
     }
-    if (connected) refreshDevice()
+  }
+
+  // One shell call gathering everything the icon needs: tunnel device, route,
+  // DNS, bytes received, kill switch, Tailscale, local network. No root, no
+  // keyring access.
+  function runQuick() {
+    if (quickProcess.running) return
+    quickProcess.running = true
+  }
+
+  function applyQuick(text, fromShared) {
+    _lastQuickText = text
+    var q = Model.parseQuick(text)
+    quick = q
+    var now = Date.now()
+    if (q.rx !== _lastRx) { _lastRx = q.rx; _rxChangedAt = now }
+    if (q.vpnDevice === "") _rxChangedAt = 0
+    else if (_rxChangedAt === 0) _rxChangedAt = now
+    setTunnelDevice(q.vpnDevice)
+    _protectionTick++
+    if (fromShared) return
+
+    // Leader: decide whether the CLI needs to run.
+    var interval = (panelOpen ? refreshIntervalSec : Math.max(300, refreshIntervalSec * 10)) * 1000
+    var mismatch = (q.vpnDevice !== "") !== connected
+    if (!installed || !_stateKnown || mismatch || now - _lastCliAt >= interval) refresh(true)
+    else Model.publishShared(_lastStatusStdout, text, now)
+  }
+
+  function setTunnelDevice(device) {
+    if (device === tunnelDevice) return
+    tunnelDevice = device
+    if (device === "") {
+      tunnelIp = ""
+      rxRate = ""
+      txRate = ""
+      _netBytes = null
+      return
+    }
+    deviceIpProcess.command = ["nmcli", "-g", "IP4.ADDRESS", "dev", "show", device]
+    if (!deviceIpProcess.running) deviceIpProcess.running = true
+  }
+
+  // Followers copy what the leader published instead of polling themselves.
+  function syncFromShared() {
+    var snap = Model.sharedSnapshot()
+    if (snap.rev === _sharedRev) return
+    _sharedRev = snap.rev
+    if (snap.quick !== "") applyQuick(snap.quick, true)
+    if (snap.status !== "") applyStatus(snap.status, true)
   }
 
   function refreshTorrent() {
@@ -208,6 +288,7 @@ Item {
   // (--p2p / --securecore / --tor). `name` connects to one specific server.
   function connectServer(code, city, name, filterKey) {
     if (toggling) return
+    if (!Model.beginAction(Date.now(), "connect")) return
     var filter = filterKey || serverFilter
     var target = { code: code || "", city: city || "", name: name || "", filter: filter }
     _lastTargetLocal = target
@@ -242,14 +323,8 @@ Item {
     }
   }
 
-  function refreshDevice() {
-    if (!deviceProcess.running) {
-      deviceProcess.command = ["nmcli", "-t", "-f", "DEVICE,TYPE,STATE", "dev", "status"]
-      deviceProcess.running = true
-    }
-  }
-
-  function applyStatus(stdout) {
+  function applyStatus(stdout, fromShared) {
+    _lastStatusStdout = stdout
     var parsed = Model.parseCliStatus(stdout)
     var prevConnected = root._lastConnected
     connected = parsed.connected
@@ -269,10 +344,8 @@ Item {
     backendState = connected ? "Connected" : "Disconnected"
     statusText = connected ? "Connected" : "Disconnected"
     if (connected) {
-      refreshDevice()
       if (!prevConnected && _stateKnown) connectedSince = Date.now()
     } else {
-      tunnelIp = ""
       connectedSince = 0
     }
     connectedUptime = connected ? formatUptime() : ""
@@ -285,20 +358,6 @@ Item {
       }
     }
     _stateKnown = true
-  }
-
-  function applyDeviceList(stdout) {
-    var device = Model.parseWireguardDevice(stdout)
-    if (!device) {
-      tunnelIp = ""
-      tunnelDevice = ""
-      rxRate = ""
-      txRate = ""
-      return
-    }
-    tunnelDevice = device
-    deviceIpProcess.command = ["nmcli", "-g", "IP4.ADDRESS", "dev", "show", device]
-    if (!deviceIpProcess.running) deviceIpProcess.running = true
   }
 
   function sampleTraffic() {
@@ -333,6 +392,7 @@ Item {
       connectServer(lastTarget.code, lastTarget.city, lastTarget.name, lastTarget.filter)
       return
     }
+    if (!Model.beginAction(Date.now(), "connect")) return
     toggling = true
     connecting = true
     lastError = ""
@@ -344,6 +404,7 @@ Item {
 
   function disconnect() {
     if (toggling || !connected) return
+    if (!Model.beginAction(Date.now(), "disconnect")) return
     toggling = true
     lastError = ""
     _desiredConnected = 0
@@ -413,20 +474,40 @@ Item {
     onFileChanged: reload()
   }
 
+  // Every 5s: take/renew the leader lease and, as leader, sample the live
+  // network state (cheap, no keyring). The CLI only runs when that sample
+  // says something changed, or on a slower schedule; see applyQuick.
   Timer {
-    id: refreshTimer
-    interval: root.refreshIntervalSec * 1000
+    id: stateTimer
+    interval: 5000
     repeat: true
     running: true
     triggeredOnStart: true
-    onTriggered: root.refresh()
+    onTriggered: {
+      root.isLeader = Model.claimLeader(root._iid, Date.now(), 20000)
+      if (root.isLeader) root.runQuick()
+    }
+  }
+
+  // Every 1s, no processes: a follower copies the leader's published state,
+  // and every instance mirrors the shared connect/disconnect action so both
+  // monitors' icons pulse together.
+  Timer {
+    id: syncTimer
+    interval: 1000
+    repeat: true
+    running: true
+    onTriggered: {
+      if (!root.isLeader) root.syncFromShared()
+      root._sharedConnect = Model.actionKind(Date.now()) === "connect"
+    }
   }
 
   Timer {
     id: delayedRefresh
     interval: 800
     repeat: false
-    onTriggered: root.refresh()
+    onTriggered: root.refresh(true)
   }
 
   Timer {
@@ -459,12 +540,12 @@ Item {
     repeat: false
     onTriggered: {
       if (statusProcess.running) statusProcess.running = false
-      if (deviceProcess.running) deviceProcess.running = false
       if (deviceIpProcess.running) deviceIpProcess.running = false
       if (toggleProcess.running) toggleProcess.running = false
       root.refreshing = false
       root.toggling = false
       root.connecting = false
+      Model.endAction()
     }
   }
 
@@ -473,7 +554,7 @@ Item {
     command: []
     onExited: function(exitCode) {
       installed = exitCode === 0
-      if (installed) root.refresh()
+      if (installed) root.refresh(true)
       else {
         root.backendState = "Unavailable"
         root.statusText = "Proton CLI not found"
@@ -492,6 +573,13 @@ Item {
   }
 
   Process {
+    id: quickProcess
+    command: ["sh", "-c", "export LC_ALL=C; echo '##dev'; nmcli -t -f DEVICE,TYPE,STATE dev status 2>/dev/null; echo '##con'; nmcli -t -f NAME,TYPE con show --active 2>/dev/null; echo '##route'; ip route get 1.1.1.1 2>/dev/null | head -1; echo '##gw'; ip -4 route show default 2>/dev/null | head -1; echo '##addr'; ip -4 -o addr show scope global 2>/dev/null | awk '{print $2, $4}' | head -1; echo '##dns'; resolvectl dns 2>/dev/null; echo '##rx'; for d in /sys/class/net/proton* /sys/class/net/pvpn*; do [ -d \"$d\" ] && echo \"$(basename $d) $(cat $d/statistics/rx_bytes 2>/dev/null)\"; done; echo '##wifi'; nmcli -t -f ACTIVE,SSID,SIGNAL dev wifi 2>/dev/null | grep '^yes' | head -1; echo '##ts'; [ -d /sys/class/net/tailscale0 ] && echo up; true"]
+    stdout: StdioCollector { id: quickStdout; waitForEnd: true }
+    onExited: function(exitCode) { root.applyQuick(String(quickStdout.text || ""), false) }
+  }
+
+  Process {
     id: statusProcess
     command: []
     stdout: StdioCollector { id: statusStdout; waitForEnd: true; onStreamFinished: root._statusOutput = text }
@@ -499,8 +587,10 @@ Item {
     onExited: function(exitCode) {
       var stdout = String(statusStdout.text || root._statusOutput || "")
       var stderr = String(statusStderr.text || root._statusError || "")
-      if (exitCode === 0) root.applyStatus(stdout)
-      else {
+      if (exitCode === 0) {
+        root.applyStatus(stdout)
+        Model.publishShared(stdout, root._lastQuickText, Date.now())
+      } else {
         var wasConnected = root._lastConnected
         root.refreshing = false
         root.connected = false
@@ -515,16 +605,6 @@ Item {
         }
         root._stateKnown = true
       }
-    }
-  }
-
-  Process {
-    id: deviceProcess
-    command: []
-    stdout: StdioCollector { id: deviceStdout; waitForEnd: true; onStreamFinished: root._deviceOutput = text }
-    onExited: function(exitCode) {
-      var stdout = String(deviceStdout.text || root._deviceOutput || "")
-      if (exitCode === 0) root.applyDeviceList(stdout)
     }
   }
 
@@ -553,6 +633,7 @@ Item {
     stderr: StdioCollector { id: toggleStderr; waitForEnd: true; onStreamFinished: root._toggleError = text }
     onExited: function(exitCode) {
       root.toggling = false
+      Model.endAction()
       // On success keep the acquiring icon until a status poll confirms the
       // tunnel (applyStatus clears it); on failure drop it now.
       if (exitCode !== 0) root.connecting = false
