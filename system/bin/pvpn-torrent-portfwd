@@ -19,6 +19,9 @@ set -uo pipefail
 . /usr/local/lib/pvpn-torrent/common.sh
 
 PORT=""
+EXIT_IP=""
+EXIT_IP_AT=0
+EXIT_IP_FOR=""
 PORT_OK=0
 PORT_ERROR=""
 QBT_PORT=""
@@ -61,6 +64,22 @@ sync_qbt_port() {
   fi
 }
 
+# The tunnel's public exit address, looked up through the tunnel (so it can
+# only ever succeed through it). Refreshed when the endpoint changes, when
+# empty, or every 10 minutes.
+lookup_exit_ip() {
+  local endpoint now ip
+  endpoint=$(nsx wg show "$WG_IF" endpoints 2>/dev/null | awk '{print $2; exit}')
+  now=$(date +%s)
+  if [[ -n "$EXIT_IP" && "$endpoint" == "$EXIT_IP_FOR" && $((now - EXIT_IP_AT)) -lt 600 ]]; then return; fi
+  ip=$(nsx curl -s --max-time 6 https://ifconfig.me/ip 2>/dev/null)
+  if [[ "$ip" =~ ^[0-9a-fA-F:.]{3,45}$ ]]; then
+    EXIT_IP="$ip"; EXIT_IP_AT=$now; EXIT_IP_FOR="$endpoint"
+  elif [[ "$endpoint" != "$EXIT_IP_FOR" ]]; then
+    EXIT_IP=""
+  fi
+}
+
 sync_fwmark() {
   local mark current
   mark=$(ip rule 2>/dev/null | grep -oE 'not from all fwmark 0x[0-9a-f]+' | head -1 | awk '{print $5}')
@@ -88,6 +107,7 @@ write_status() {
     echo "handshake=${hs:-0}"
     echo "rx=${rx:-0}"
     echo "tx=${tx:-0}"
+    echo "exit_ip=$EXIT_IP"
     echo "port=$PORT"
     echo "port_ok=$PORT_OK"
     echo "port_error=$PORT_ERROR"
@@ -106,6 +126,7 @@ while true; do
   fi
   sync_fwmark
   (( cycle % 3 == 0 )) && renew_port
+  lookup_exit_ip
   sync_qbt_port
   write_status
   cycle=$((cycle + 1))

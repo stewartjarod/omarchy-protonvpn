@@ -97,13 +97,15 @@ Item {
   // "none" | "inside" | "outside" (leak: real connection) | "stale" (in an
   // old namespace after a tunnel restart: no network until restarted)
   property string qbtState: "none"
+  // Other torrent apps (transmission, deluge, ...) running outside the tunnel.
+  property var otherOutside: []
   readonly property bool torrentLeak: qbtState === "outside" && torrentInstalled
   // Re-evaluated whenever the status file (every 15s) or the qBittorrent
   // check (every 10s) updates; see Model.torrentHealth.
   // _healthTick (bumped every 10s) makes the handshake age re-evaluate even if
   // the status file stops updating.
   property int _healthTick: 0
-  readonly property var torrentHealth: { _healthTick; return Model.torrentHealth(torrentInstalled, torrentUp, qbtState, torrentStatus, Date.now()) }
+  readonly property var torrentHealth: { _healthTick; return Model.torrentHealth(torrentInstalled, torrentUp, qbtState, torrentStatus, Date.now(), otherOutside) }
   readonly property string torrentState: torrentHealth.state
   onTorrentStateChanged: {
     if (torrentState === "error" && Model.shouldNotifyTorrent("error:" + torrentHealth.reason, Date.now()))
@@ -130,6 +132,7 @@ Item {
   property var _countryNames: ({})
   property string _serverListText: ""
   property bool _stateKnown: false
+  property bool _settingsLoaded: false
   property bool _lastConnected: false
   property var _netBytes: null
   property var _netSampleAt: 0
@@ -233,6 +236,57 @@ Item {
     if (snap.status !== "") applyStatus(snap.status, true)
   }
 
+  // ---- Proton settings (kill switch, NetShield, ... and the protocol) ----
+  property var protonSettings: ({})
+  property bool settingBusy: false
+  property string protocolSetting: ""
+
+  function refreshSettings() {
+    if (!installed || settingsListProcess.running) return
+    settingsListProcess.running = true
+    protocolFile.reload()
+  }
+
+  function protonSettingValue(def) {
+    return def.kind === "file" ? protocolSetting : (protonSettings[def.key] || "")
+  }
+
+  // Cycles one setting to its next value.
+  function cycleSetting(def) {
+    if (settingBusy) return
+    var next = Model.nextSettingValue(def, protonSettingValue(def))
+    settingBusy = true
+    _settingKey = def.key
+    _settingValue = next
+    if (def.kind === "cli") {
+      settingSetProcess.command = ["protonvpn", "config", "set", def.key, next]
+    } else {
+      // Atomic edit of one key; never creates the file, refuses unknown values.
+      settingSetProcess.command = ["python3", "-I", "-c",
+        "import json,os,sys\np=os.path.expanduser('~/.config/Proton/VPN/settings.json')\nd=json.load(open(p))\nassert sys.argv[1] in ('wireguard','openvpn-udp','openvpn-tcp')\nd['protocol']=sys.argv[1]\nt=p+'.tmp'\njson.dump(d,open(t,'w'),indent=2)\nos.replace(t,p)", next]
+    }
+    settingSetProcess.running = true
+  }
+  property string _settingKey: ""
+  property string _settingValue: ""
+
+  // ---- torrent tunnel leak check (read-only root helper) ----
+  property bool checkRunning: false
+  property var checkResult: null
+  property real checkAt: 0
+
+  // Runs pvpn-torrent-check, saves the full report under
+  // ~/Documents/VPN leak checks/ (newest 20 kept) and keeps the summary.
+  function runLeakCheck() {
+    if (checkRunning || !torrentInstalled) return
+    checkRunning = true
+    checkProcess.running = true
+  }
+
+  function openReports() {
+    Quickshell.execDetached(["sh", "-c", "mkdir -p \"$HOME/Documents/VPN leak checks\" && xdg-open \"$HOME/Documents/VPN leak checks\""])
+  }
+
   function refreshTorrent() {
     _healthTick++
     if (qbtCheckProcess.running) return
@@ -259,6 +313,7 @@ Item {
     var r = Model.parseQbtCheck(text)
     torrentInstalled = r.installed
     _torrentNs = r.nsUp
+    otherOutside = r.otherOutside
     qbtState = r.outside > 0 ? "outside" : (r.stale > 0 ? "stale" : (r.inside > 0 ? "inside" : "none"))
   }
 
@@ -444,9 +499,66 @@ Item {
   Process {
     id: qbtCheckProcess
     // installed/ns header, then where each qBittorrent process lives.
-    command: ["sh", "-c", "i=0; [ -x /usr/local/bin/pvpn-torrent-launch ] && i=1; n=0; [ -e /run/netns/pvpntor ] && n=1; echo \"installed=$i ns=$n\"; ns=$(stat -Lc %i /run/netns/pvpntor 2>/dev/null); me=$(stat -Lc %i /proc/self/ns/net); for p in $(pgrep -u \"$(id -u)\" -x qbittorrent); do x=$(stat -Lc %i /proc/$p/ns/net 2>/dev/null) || continue; if [ -n \"$ns\" ] && [ \"$x\" = \"$ns\" ]; then echo inside; elif [ \"$x\" = \"$me\" ]; then echo outside; else echo stale; fi; done"]
+    command: ["sh", "-c", "i=0; [ -x /usr/local/bin/pvpn-torrent-launch ] && i=1; n=0; [ -e /run/netns/pvpntor ] && n=1; echo \"installed=$i ns=$n\"; ns=$(stat -Lc %i /run/netns/pvpntor 2>/dev/null); me=$(stat -Lc %i /proc/self/ns/net); for a in qbittorrent qbittorrent-nox transmission-daemon transmission-gtk transmission-qt deluged deluge deluge-gtk rtorrent ktorrent aria2c; do for p in $(pgrep -u \"$(id -u)\" -x \"$a\"); do x=$(stat -Lc %i /proc/$p/ns/net 2>/dev/null) || continue; if [ -n \"$ns\" ] && [ \"$x\" = \"$ns\" ]; then echo \"inside $a\"; elif [ \"$x\" = \"$me\" ]; then echo \"outside $a\"; else echo \"stale $a\"; fi; done; done; for s in transmission transmission-daemon deluged qbittorrent-nox rtorrent; do systemctl is-active --quiet $s.service 2>/dev/null && echo \"outside $s.service\"; done; true"]
     stdout: StdioCollector { id: qbtCheckStdout; waitForEnd: true }
     onExited: root.applyQbtCheck(String(qbtCheckStdout.text || ""))
+  }
+
+  Process {
+    id: settingsListProcess
+    command: ["protonvpn", "config", "list"]
+    stdout: StdioCollector { id: settingsListStdout; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode === 0) root.protonSettings = Model.parseConfigList(String(settingsListStdout.text || ""))
+    }
+  }
+
+  Process {
+    id: settingSetProcess
+    command: []
+    stderr: StdioCollector { id: settingSetStderr; waitForEnd: true }
+    stdout: StdioCollector { id: settingSetStdout; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.settingBusy = false
+      if (exitCode !== 0) {
+        root.lastError = Model.elideStatus(settingSetStderr.text || settingSetStdout.text || "Could not change the setting")
+        root.actionStatus = root.lastError
+        actionStatusTimer.restart()
+      } else {
+        if (root._settingKey === "protocol") root.actionStatus = "Protocol applies on the next connect"
+        else if (root._settingKey === "kill-switch" && root._settingValue === "standard" && root.quick.tailscale)
+          root.actionStatus = "Kill switch is on: it blocks Tailscale while the VPN is connected"
+        else root.actionStatus = ""
+        if (root.actionStatus !== "") actionStatusTimer.restart()
+      }
+      root.refreshSettings()
+    }
+  }
+
+  FileView {
+    id: protocolFile
+    path: (Quickshell.env("HOME") || "") + "/.config/Proton/VPN/settings.json"
+    printErrors: false
+    onLoaded: {
+      try { root.protocolSetting = String(JSON.parse(text()).protocol || "") } catch (e) { root.protocolSetting = "" }
+    }
+  }
+
+  Process {
+    id: checkProcess
+    command: ["sh", "-c", "d=\"$HOME/Documents/VPN leak checks\"; mkdir -p \"$d\"; ts=$(date +%Y-%m-%d_%H%M%S); out=$(sudo -n /usr/local/bin/pvpn-torrent-check 2>&1); { echo \"Proton VPN torrent tunnel check, $(date)\"; echo; printf '%s\\n' \"$out\" | awk -F'\\t' '$1==\"SUMMARY\"{print \"RESULT: \" $2 \" passed, \" $3 \" failed, \" $4 \" warnings\"; next} {print $1 \": \" $2}'; } > \"$d/torrent-$ts.txt\"; cp \"$d/torrent-$ts.txt\" \"$d/latest-torrent.txt\"; ls -1t \"$d\"/torrent-*.txt | tail -n +21 | xargs -r rm -f; printf '%s\\n' \"$out\""]
+    stdout: StdioCollector { id: checkStdout; waitForEnd: true }
+    onExited: function() {
+      var r = Model.parseCheckOutput(String(checkStdout.text || ""))
+      root.checkResult = r
+      root.checkAt = Date.now()
+      root.checkRunning = false
+      if (!r.done) {
+        root.lastError = "Leak check could not run (is the system part installed?)"
+      } else if (r.fail > 0) {
+        root.notify("Torrent tunnel check failed", r.failures[0] + (r.fail > 1 ? " (+" + (r.fail - 1) + " more)" : ""), true)
+      }
+    }
   }
 
   Process {
@@ -484,6 +596,16 @@ Item {
     running: true
     triggeredOnStart: true
     onTriggered: {
+      // Every instance (leader or not) needs to know the CLI exists and to
+      // read the settings once; only the leader runs status polling.
+      if (!root.installed && !whichProcess.running) {
+        whichProcess.command = ["which", "protonvpn"]
+        whichProcess.running = true
+      }
+      if (root.installed && !root._settingsLoaded) {
+        root._settingsLoaded = true
+        root.refreshSettings()
+      }
       root.isLeader = Model.claimLeader(root._iid, Date.now(), 20000)
       if (root.isLeader) root.runQuick()
     }
@@ -554,10 +676,11 @@ Item {
     command: []
     onExited: function(exitCode) {
       installed = exitCode === 0
-      if (installed) root.refresh(true)
-      else {
+      if (!installed) {
         root.backendState = "Unavailable"
         root.statusText = "Proton CLI not found"
+      } else if (root.isLeader) {
+        root.refresh(true)
       }
     }
   }

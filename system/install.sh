@@ -65,7 +65,7 @@ say "Installing scripts"
 install -d -m 755 /usr/local/lib/pvpn-torrent
 install -m 644 "$SRC/lib/common.sh" /usr/local/lib/pvpn-torrent/common.sh
 install -m 755 "$SRC/uninstall.sh" /usr/local/lib/pvpn-torrent/uninstall.sh
-for f in pvpn-torrent-up pvpn-torrent-down pvpn-torrent-portfwd pvpn-torrent-launch qbittorrent; do
+for f in pvpn-torrent-up pvpn-torrent-down pvpn-torrent-portfwd pvpn-torrent-launch pvpn-torrent-check qbittorrent; do
   install -m 755 "$SRC/bin/$f" "/usr/local/bin/$f"
 done
 
@@ -88,6 +88,14 @@ fi
 if [[ -n "$CONF_IN" ]]; then
   say "Installing $(basename "$CONF_IN") as the torrent server ($(wg_server_tag "$CONF_IN"))"
   install -m 600 -o root -g root "$CONF_IN" /etc/pvpn-torrent/wg.conf
+  # The config holds a private key: once the root-only copy is installed,
+  # don't leave the original in the home folder (Downloads, Documents, ...)
+  # where backup and sync tools copy it.
+  if cmp -s "$CONF_IN" /etc/pvpn-torrent/wg.conf; then
+    case "$(readlink -f "$CONF_IN")" in
+      "$RUN_HOME"/*) rm -f "$CONF_IN"; echo "    removed $CONF_IN (the installed copy is readable by root only)" ;;
+    esac
+  fi
 fi
 
 # --- sudoers (validated before install: a broken file locks sudo) ------------

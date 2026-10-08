@@ -13,7 +13,7 @@ systemctl daemon-reload
 
 rm -f /etc/sudoers.d/90-pvpn-torrent
 rm -f /usr/local/bin/pvpn-torrent-up /usr/local/bin/pvpn-torrent-down /usr/local/bin/pvpn-torrent-portfwd \
-      /usr/local/bin/pvpn-torrent-launch /usr/local/bin/qbittorrent
+      /usr/local/bin/pvpn-torrent-launch /usr/local/bin/pvpn-torrent-check /usr/local/bin/qbittorrent
 rm -rf /etc/netns/pvpntor /run/pvpn-torrent
 
 RUN_USER="${SUDO_USER:-}"

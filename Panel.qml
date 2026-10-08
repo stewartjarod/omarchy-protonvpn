@@ -63,6 +63,7 @@ Panel {
   property bool serversExpanded: false
   property string expandedCountry: ""
   property string expandedCity: ""
+  property bool settingsExpanded: false
   property string searchQuery: ""
 
   // Favorites persist in this widget's shell.json entry (settings.favorites),
@@ -232,7 +233,27 @@ Panel {
   readonly property int infoOffset: serversOffset + visibleCountryCount
   readonly property int torrentOffset: infoOffset + infoRows.length
   readonly property int networkOffset: torrentOffset + torrentRows.length
-  readonly property int actionsOffset: networkOffset + networkRows.length
+  readonly property int settingsOffset: networkOffset + networkRows.length
+  readonly property int actionsOffset: settingsOffset + visibleSettingsCount
+
+  // Proton settings (cycle a row to change it). Kill-switch note: it blocks
+  // Tailscale and, with the torrent tunnel, relies on the tunnel's fwmark
+  // bypass; see README.
+  function buildSettingsRows() {
+    var rows = []
+    if (!service || !service.installed) return rows
+    var defs = Model.PROTON_SETTINGS
+    for (var i = 0; i < defs.length; i++) {
+      var d = defs[i]
+      var v = service.protonSettingValue(d)
+      var hint = Model.showSettingValue(d, v)
+      if (d.key === "protocol" && service.connected) hint += " \u00b7 next connect"
+      rows.push({ action: "cycleSetting", value: d, label: d.label, hint: hint })
+    }
+    return rows
+  }
+  readonly property var settingsRows: buildSettingsRows()
+  readonly property int visibleSettingsCount: settingsExpanded ? settingsRows.length : 0
 
   // Local network context, plus a Tailscale note: Proton's kill switch blocks
   // tailnet traffic and MagicDNS while it is armed.
@@ -269,6 +290,7 @@ Panel {
       rows.push({ action: st.port ? "copyPort" : "none", label: "Forwarded port", hint: portHint })
       rows.push({ action: "none", label: "Handshake", hint: Model.formatAgo(st.handshake, Date.now()) })
     }
+    if (service.torrentUp && st.exit_ip) rows.push({ action: "copyText", value: st.exit_ip, label: "Exit IP", hint: st.exit_ip })
     var q = service.qbtState
     // Inside the namespace with the tunnel off = no network at all (it comes
     // back on its own when the tunnel does).
@@ -277,6 +299,20 @@ Panel {
       : q === "stale" ? "no network \u2014 click to restart"
       : (service.torrentUp ? "open" : "tunnel off")
     rows.push({ action: "openQbt", label: "qBittorrent", hint: qbtHint })
+    if (service.otherOutside && service.otherOutside.length > 0)
+      rows.push({ action: "none", label: "Other clients", hint: service.otherOutside.join(", ") + " outside tunnel" })
+
+    var cr = service.checkResult
+    var checkHint = service.checkRunning ? "running\u2026"
+      : !cr ? "run now"
+      : !cr.done ? "could not run"
+      : (cr.fail > 0 ? "! " + cr.fail + " failed" : "\u2713 " + cr.pass + " passed") + (cr.warn > 0 ? " \u00b7 " + cr.warn + " warning" + (cr.warn > 1 ? "s" : "") : "") + " \u00b7 " + Model.formatAgo(service.checkAt / 1000, Date.now())
+    rows.push({ action: "runCheck", label: "Check for leaks", hint: checkHint })
+    if (cr && cr.done) {
+      for (var f = 0; f < cr.failures.length; f++) rows.push({ action: "none", label: "\u2717 " + cr.failures[f], hint: "" })
+      for (var w = 0; w < cr.warnings.length; w++) rows.push({ action: "none", label: "! " + cr.warnings[w], hint: "" })
+      rows.push({ action: "openReports", label: "Open saved reports", hint: "" })
+    }
     return rows
   }
   readonly property var torrentRows: buildTorrentRows()
@@ -287,6 +323,7 @@ Panel {
     for (var i = 0; i < infoRows.length; i++) rows.push(infoRows[i])
     for (var t = 0; t < torrentRows.length; t++) rows.push(torrentRows[t])
     for (var n = 0; n < networkRows.length; n++) rows.push(networkRows[n])
+    for (var g = 0; g < visibleSettingsCount; g++) rows.push(settingsRows[g])
     for (var j = 0; j < actionRows.length; j++) rows.push(actionRows[j])
     return rows
   }
@@ -382,6 +419,9 @@ Panel {
     else if (action === "toggleTorrent") service.setTorrentTunnel(!service.torrentUp)
     else if (action === "copyPort") service.copyText(String((service.torrentStatus || {}).port || ""))
     else if (action === "openQbt") service.openQbittorrent()
+    else if (action === "runCheck") service.runLeakCheck()
+    else if (action === "cycleSetting") service.cycleSetting(value)
+    else if (action === "openReports") service.openReports()
     else if (action === "toggleCountry") { expandedCity = ""; expandedCountry = expandedCountry === value ? "" : value }
     else if (action === "toggleCity") {
       var same = expandedCountry === value.country && expandedCity === value.city
@@ -416,6 +456,12 @@ Panel {
     showTunnel()
   }
 
+  function toggleSettings() {
+    settingsExpanded = !settingsExpanded
+    if (settingsExpanded && service) service.refreshSettings()
+    clampSelection()
+  }
+
   function toggleServers() {
     serversExpanded = !serversExpanded
   }
@@ -433,6 +479,7 @@ Panel {
       selectedIndex = 0
       cursorActive = false
       serversExpanded = false
+      settingsExpanded = false
       expandedCountry = ""
       expandedCity = ""
       searchQuery = ""
@@ -493,6 +540,7 @@ Panel {
         else if (t === "s" || t === "S") root.toggleServers()
         else if (t === "f" || t === "F") { if (root.service) root.service.cycleServerFilter() }
         else if (t === "b" || t === "B") root.favoriteCursor()
+        else if (t === "g" || t === "G") root.toggleSettings()
         else if (t === "/") root.focusSearch()
         else if (t === "r" || t === "R") {
           if (root.service) { root.service.refresh(true); root.service.refreshServerList() }
@@ -809,6 +857,53 @@ Panel {
                   label: modelData.label
                   hint: modelData.hint
                   rowIndex: root.networkOffset + index
+                  actionName: modelData.action
+                  actionValue: modelData.value
+                }
+              }
+            }
+          }
+
+          Column {
+            width: parent.width
+            spacing: Style.space(2)
+            visible: root.settingsRows.length > 0
+
+            Item {
+              width: parent.width
+              implicitHeight: settingsHeaderText.implicitHeight + Style.space(4)
+
+              PanelSectionHeader {
+                id: settingsHeaderText
+                anchors.left: parent.left
+                anchors.right: parent.right
+                text: (root.settingsExpanded ? "\u25be " : "\u25b8 ") + "SETTINGS"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.toggleSettings()
+              }
+            }
+
+            Repeater {
+              model: root.settingsExpanded ? root.settingsRows : []
+
+              delegate: Item {
+                required property var modelData
+                required property int index
+                width: parent.width
+                height: cursorRow.implicitHeight
+
+                CursorRow {
+                  id: cursorRow
+                  width: parent.width
+                  label: modelData.label
+                  hint: modelData.hint
+                  rowIndex: root.settingsOffset + index
                   actionName: modelData.action
                   actionValue: modelData.value
                 }

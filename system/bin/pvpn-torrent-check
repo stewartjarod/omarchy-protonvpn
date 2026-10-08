@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# ============================================================================
+#  pvpn-torrent-check - prove the torrent tunnel is sealed, on the live system.
+#
+#  Observes the real network namespace, routes, firewall, DNS and processes
+#  rather than reading settings. Prints one line per check:
+#      PASS|FAIL|WARN|SKIP <TAB> description
+#  and a final "SUMMARY <TAB> <pass> <fail> <warn>". Exit status is 1 if any
+#  check failed. Takes no arguments except the optional --fail-closed, which
+#  briefly takes the tunnel interface down to prove nothing gets out (it
+#  interrupts torrent traffic for a few seconds, so it is never run from the
+#  panel).
+#
+#  Allowed passwordless via /etc/sudoers.d/90-pvpn-torrent (no arguments are
+#  accepted from the caller beyond --fail-closed).
+# ============================================================================
+set -uo pipefail
+. /usr/local/lib/pvpn-torrent/common.sh
+
+FAIL_CLOSED=0
+[[ "${1:-}" == "--fail-closed" ]] && FAIL_CLOSED=1
+
+pass=0; fail=0; warn=0
+ok()   { printf 'PASS\t%s\n' "$*"; pass=$((pass+1)); }
+bad()  { printf 'FAIL\t%s\n' "$*"; fail=$((fail+1)); }
+note() { printf 'WARN\t%s\n' "$*"; warn=$((warn+1)); }
+skip() { printf 'SKIP\t%s\n' "$*"; }
+nsx()  { ip netns exec "$NS" "$@"; }
+
+# Torrent apps this checks for. Matched by exact process name.
+APPS=(qbittorrent qbittorrent-nox transmission-daemon transmission-gtk transmission-qt \
+      deluged deluge deluge-gtk rtorrent ktorrent aria2c)
+
+if ! ns_exists; then
+  bad "namespace '$NS' does not exist (torrent tunnel is not running)"
+  printf 'SUMMARY\t%d\t%d\t%d\n' "$pass" "$fail" "$warn"
+  exit 1
+fi
+ok "namespace '$NS' exists"
+
+# --- namespace: interfaces, routes, handshake, firewall ----------------------
+links=$(ip -n "$NS" -o link show | awk -F': ' '{print $2}' | sed 's/@.*//' | sort | tr '\n' ' ')
+if [[ "$links" == "$WG_IF lo " || "$links" == "lo $WG_IF " ]]; then
+  ok "only lo and $WG_IF exist in the namespace, so there is no other path out"
+elif [[ "$links" == "lo " ]]; then
+  bad "the namespace has only loopback: the tunnel interface is missing (tunnel down)"
+else
+  bad "unexpected interfaces in the namespace: $links"
+fi
+
+defrt=$(ip -n "$NS" route show default)
+if [[ "$defrt" == *"dev $WG_IF"* && $(wc -l <<<"$defrt") -eq 1 ]]; then
+  ok "default route is via $WG_IF only"
+else
+  bad "default route is not solely via $WG_IF: ${defrt:-none}"
+fi
+
+hs=$(nsx wg show "$WG_IF" latest-handshakes 2>/dev/null | awk '{print $2; exit}')
+if [[ -n "${hs:-}" && "$hs" -gt 0 ]]; then
+  age=$(( $(date +%s) - hs ))
+  if (( age < 180 )); then ok "last WireGuard handshake ${age}s ago"
+  else bad "last WireGuard handshake ${age}s ago (tunnel stalled)"; fi
+else
+  bad "no WireGuard handshake yet"
+fi
+
+if nsx nft list ruleset 2>/dev/null | grep -q 'policy drop'; then
+  ok "default-deny firewall is loaded in the namespace"
+else
+  bad "the namespace's default-deny firewall is not loaded"
+fi
+
+# --- exit address: namespace must leave from a different IP than the host ----
+ns_ip=$(nsx curl -s --max-time 8 https://ifconfig.me/ip 2>/dev/null)
+host_ip=$(curl -s --max-time 8 https://ifconfig.me/ip 2>/dev/null)
+if [[ -z "$ns_ip" ]]; then
+  bad "no connectivity through the tunnel (could not fetch the exit address)"
+elif [[ -n "$host_ip" && "$ns_ip" == "$host_ip" ]]; then
+  bad "the namespace exits from the host's own address ($host_ip): traffic is not tunneled"
+else
+  ok "torrent traffic exits from $ns_ip (host: ${host_ip:-unknown})"
+fi
+
+# --- DNS ----------------------------------------------------------------------
+ns_res=$(grep -E '^nameserver' "/etc/netns/$NS/resolv.conf" 2>/dev/null | awk '{print $2}' | tr '\n' ' ')
+if [[ -n "$ns_res" && "$ns_res" != *127.* ]]; then
+  ok "namespace resolver is $ns_res(in-tunnel), not the host's stub"
+else
+  bad "namespace resolver is '${ns_res:-none}': could reach the host's resolver"
+fi
+if grep -E '^hosts:' "/etc/netns/$NS/nsswitch.conf" 2>/dev/null | grep -qE 'resolve|mdns'; then
+  bad "namespace nsswitch.conf uses resolve/mdns (systemd-resolved can answer outside the tunnel)"
+else
+  ok "namespace nsswitch.conf excludes resolve/mdns"
+fi
+if nsx getent hosts example.com >/dev/null 2>&1; then ok "DNS resolves inside the namespace"
+else bad "DNS does not resolve inside the namespace"; fi
+
+if [[ "$(nsx sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)" == "1" ]]; then
+  ok "IPv6 is disabled inside the namespace"
+else
+  bad "IPv6 is enabled inside the namespace"
+fi
+
+# --- desktop VPN coexistence --------------------------------------------------
+mark=$(ip rule 2>/dev/null | grep -oE 'not from all fwmark 0x[0-9a-f]+' | head -1 | awk '{print $5}')
+cur=$(nsx wg show "$WG_IF" fwmark 2>/dev/null)
+if [[ -n "$mark" ]]; then
+  if [[ "$cur" == "$mark" ]]; then ok "tunnel carries fwmark $mark, so the desktop VPN never wraps it"
+  else bad "the desktop VPN is up but the torrent tunnel has fwmark '${cur:-off}' (expected $mark); it may nest inside the desktop VPN"; fi
+else
+  skip "no desktop VPN policy rule active (fwmark not needed)"
+fi
+
+# --- port forwarding ----------------------------------------------------------
+port=$(grep '^port=' "$RUN_DIR/status" 2>/dev/null | cut -d= -f2)
+pok=$(grep '^port_ok=' "$RUN_DIR/status" 2>/dev/null | cut -d= -f2)
+if [[ "${pok:-0}" == "1" && -n "$port" ]]; then
+  ok "forwarded port $port is mapped"
+  qp=$(nsx curl -s --max-time 3 "http://127.0.0.1:$QBT_WEBUI_PORT/api/v2/app/preferences" 2>/dev/null | grep -oE '"listen_port":[0-9]+' | grep -oE '[0-9]+$')
+  if [[ -z "$qp" ]]; then skip "qBittorrent WebUI is not reachable (client closed or WebUI off)"
+  elif [[ "$qp" == "$port" ]]; then ok "qBittorrent listens on the forwarded port $port"
+  else bad "qBittorrent listens on $qp but the forwarded port is $port"; fi
+else
+  note "no forwarded port (NAT-PMP failed or was off when the config was made): peers can't connect in"
+fi
+
+# --- torrent apps: where is each one really? ---------------------------------
+ns_ino=$(stat -Lc '%i' "/run/netns/$NS")
+found=0; outside=0
+for app in "${APPS[@]}"; do
+  for pid in $(pgrep -x "$app" 2>/dev/null); do
+    found=$((found+1))
+    pino=$(stat -Lc '%i' "/proc/$pid/ns/net" 2>/dev/null)
+    if [[ "$pino" == "$ns_ino" ]]; then
+      ok "$app (pid $pid) is inside the tunnel namespace"
+    else
+      outside=$((outside+1))
+      bad "$app (pid $pid) is OUTSIDE the tunnel: it is using your real connection"
+    fi
+  done
+done
+(( found == 0 )) && skip "no torrent app is running"
+for svc in transmission transmission-daemon deluged qbittorrent-nox rtorrent; do
+  if systemctl is-active --quiet "$svc.service" 2>/dev/null; then
+    bad "system service $svc.service is running outside the tunnel"
+  fi
+done
+
+# --- the way in: wrapper, launchers -------------------------------------------
+if [[ -n "$TARGET_USER" ]]; then
+  resolved=$(runuser -u "$TARGET_USER" -- env PATH="/usr/local/bin:/usr/bin" bash -c 'command -v qbittorrent' 2>/dev/null)
+  if [[ "$resolved" == "/usr/local/bin/qbittorrent" ]]; then ok "'qbittorrent' resolves to the protective wrapper"
+  else bad "'qbittorrent' resolves to '${resolved:-nothing}', not the wrapper"; fi
+
+  home=$(getent passwd "$TARGET_USER" | cut -d: -f6)
+  bypass=$(grep -lE '^Exec=.*(/usr/bin/qbittorrent)' "$home"/.local/share/applications/*.desktop "$home"/.config/autostart/*.desktop 2>/dev/null | tr '\n' ' ')
+  if [[ -z "$bypass" ]]; then ok "no user launcher or autostart entry calls /usr/bin/qbittorrent directly"
+  else bad "launchers that skip the wrapper: $bypass"; fi
+
+  la="$home/.local/share/applications/org.qbittorrent.qBittorrent.desktop"
+  if [[ -f "$la" ]] && grep -qE '^Exec=(/usr/local/bin/)?qbittorrent' "$la"; then ok "the qBittorrent launcher and magnet links reach the wrapper"
+  elif [[ -f "$la" ]]; then bad "the qBittorrent launcher does not use the wrapper"
+  else note "no user launcher override; the system one uses 'qbittorrent' from PATH (fine if the wrapper is first)"; fi
+fi
+
+# --- optional: prove it fails closed ------------------------------------------
+if (( FAIL_CLOSED )); then
+  ip -n "$NS" link set "$WG_IF" down
+  if nsx curl -s --max-time 5 https://ifconfig.me/ip >/dev/null 2>&1; then bad "with the tunnel down, the namespace still reached the internet"
+  else ok "with the tunnel down, nothing gets out"; fi
+  if nsx getent hosts example.com >/dev/null 2>&1; then bad "with the tunnel down, DNS still resolved"
+  else ok "with the tunnel down, DNS does not resolve"; fi
+  ip -n "$NS" link set "$WG_IF" up
+  ip -n "$NS" route replace default dev "$WG_IF"
+  sleep 3
+  if nsx curl -s --max-time 8 https://ifconfig.me/ip >/dev/null 2>&1; then ok "tunnel restored and working again"
+  else bad "the tunnel did not come back; restart it: sudo systemctl restart pvpn-torrent.service"; fi
+fi
+
+printf 'SUMMARY\t%d\t%d\t%d\n' "$pass" "$fail" "$warn"
+(( fail == 0 ))

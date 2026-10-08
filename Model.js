@@ -67,8 +67,10 @@ function shouldNotifyTorrent(state, now) {
 //   error: qBittorrent outside the tunnel (real connection, even with the
 //   tunnel off), stuck in an old namespace, or the tunnel up but with no
 //   WireGuard handshake for 3+ minutes (not passing traffic).
-function torrentHealth(installed, up, qbtState, status, nowMs) {
+function torrentHealth(installed, up, qbtState, status, nowMs, otherOutside) {
   if (!installed) return { state: "off", reason: "" }
+  if (otherOutside && otherOutside.length > 0 && qbtState !== "outside")
+    return { state: "error", short: otherOutside[0] + " outside tunnel", reason: otherOutside.join(", ") + " is running outside the tunnel, on your real connection" }
   if (qbtState === "outside") return { state: "error", short: "qBittorrent outside tunnel", reason: "qBittorrent is outside the tunnel, on your real connection" }
   if (!up) return { state: "off", reason: "" }
   if (qbtState === "stale") return { state: "error", short: "qBittorrent has no network", reason: "qBittorrent is in an old tunnel with no network" }
@@ -427,6 +429,41 @@ function countryRowsWhere(logicals, countryNames, predicate, sortByName) {
   return rows
 }
 
+// Proton settings the panel exposes, in display order. `values` cycle on
+// activate. kind "cli" = `protonvpn config set`; kind "file" = a key in
+// ~/.config/Proton/VPN/settings.json (the CLI has no command for it).
+var PROTON_SETTINGS = [
+  { key: "kill-switch", label: "Kill switch", kind: "cli", values: ["off", "standard"],
+    show: { "off": "off", "standard": "on" } },
+  { key: "netshield", label: "NetShield", kind: "cli", values: ["off", "malware-only", "malware-ads-trackers"],
+    show: { "off": "off", "malware-only": "malware", "malware-ads-trackers": "malware + ads + trackers" } },
+  { key: "port-forwarding", label: "Port forwarding", kind: "cli", values: ["off", "on"], show: {} },
+  { key: "moderate-nat", label: "Moderate NAT", kind: "cli", values: ["off", "on"], show: {} },
+  { key: "vpn-accelerator", label: "VPN Accelerator", kind: "cli", values: ["off", "on"], show: {} },
+  { key: "protocol", label: "Protocol", kind: "file", values: ["wireguard", "openvpn-udp", "openvpn-tcp"],
+    show: { "wireguard": "WireGuard", "openvpn-udp": "OpenVPN UDP", "openvpn-tcp": "OpenVPN TCP" } }
+]
+
+// `protonvpn config list` table -> { key: value }
+function parseConfigList(text) {
+  var out = {}
+  var lines = String(text || "").split("\n")
+  for (var i = 0; i < lines.length; i++) {
+    var m = /^([a-z][a-z-]*)\s{2,}(\S+)\s*$/.exec(lines[i])
+    if (m) out[m[1]] = m[2]
+  }
+  return out
+}
+
+function nextSettingValue(def, current) {
+  var i = def.values.indexOf(current)
+  return def.values[(i + 1) % def.values.length]
+}
+
+function showSettingValue(def, value) {
+  return def.show[value] || value || "\u2026"
+}
+
 // Parses /run/pvpn-torrent/status (key=value lines from pvpn-torrent-portfwd).
 function parseTorrentStatus(text) {
   var out = {}
@@ -443,12 +480,33 @@ function parseTorrentStatus(text) {
 function parseQbtCheck(text) {
   var lines = String(text || "").split("\n")
   var head = lines[0] || ""
-  var r = { installed: /installed=1/.test(head), nsUp: /ns=1/.test(head), inside: 0, outside: 0, stale: 0 }
+  var r = { installed: /installed=1/.test(head), nsUp: /ns=1/.test(head),
+            inside: 0, outside: 0, stale: 0, otherOutside: [] }
   for (var i = 1; i < lines.length; i++) {
-    var l = lines[i].trim()
-    if (l === "inside") r.inside++
-    else if (l === "outside") r.outside++
-    else if (l === "stale") r.stale++
+    var m = /^(inside|outside|stale)\s+(\S+)/.exec(lines[i].trim())
+    if (!m) continue
+    var isQbt = /^qbittorrent/.test(m[2])
+    if (isQbt) r[m[1]]++
+    else if (m[1] === "outside") r.otherOutside.push(m[2])
+  }
+  return r
+}
+
+// pvpn-torrent-check output: "PASS|FAIL|WARN|SKIP<TAB>text" lines and a final
+// "SUMMARY<TAB>pass<TAB>fail<TAB>warn".
+function parseCheckOutput(text) {
+  var r = { pass: 0, fail: 0, warn: 0, failures: [], warnings: [], done: false }
+  var lines = String(text || "").split("\n")
+  for (var i = 0; i < lines.length; i++) {
+    var p = lines[i].split("\t")
+    if (p[0] === "FAIL") r.failures.push(stripMarkup(p[1] || ""))
+    else if (p[0] === "WARN") r.warnings.push(stripMarkup(p[1] || ""))
+    else if (p[0] === "SUMMARY") {
+      r.pass = Number(p[1]) || 0
+      r.fail = Number(p[2]) || 0
+      r.warn = Number(p[3]) || 0
+      r.done = true
+    }
   }
   return r
 }

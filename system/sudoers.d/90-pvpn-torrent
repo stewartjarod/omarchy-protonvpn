@@ -3,7 +3,10 @@
 #
 #  * pvpn-torrent-launch starts the hardcoded /usr/bin/qbittorrent inside the
 #    tunnel and drops to @USER@ before exec (arguments only reach that process).
+#  * pvpn-torrent-check observes namespace, routes, firewall and processes;
+#    it takes no arguments from the panel.
 #  * start/stop/restart of the tunnel unit, for the bar panel's toggle.
 Defaults!/usr/local/bin/pvpn-torrent-launch env_keep += "WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE QT_QPA_PLATFORMTHEME QT_STYLE_OVERRIDE XCURSOR_THEME XCURSOR_SIZE GTK_THEME HYPRLAND_INSTANCE_SIGNATURE"
 @USER@ ALL=(root) NOPASSWD: /usr/local/bin/pvpn-torrent-launch
+@USER@ ALL=(root) NOPASSWD: /usr/local/bin/pvpn-torrent-check
 @USER@ ALL=(root) NOPASSWD: /usr/bin/systemctl start pvpn-torrent.service, /usr/bin/systemctl stop pvpn-torrent.service, /usr/bin/systemctl restart pvpn-torrent.service
