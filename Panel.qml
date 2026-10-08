@@ -304,7 +304,19 @@ Panel {
       searchQuery = ""
       _favoritesLocal = null
       if (service) service.refreshServerList()
+      if (Model.consumeSearchRequest(Date.now())) {
+        serversExpanded = true
+        searchFocusTimer.restart()
+      }
     }
+  }
+
+  // KeyboardPanel focuses the key catcher just after opening; take focus
+  // for the search field once that has happened.
+  Timer {
+    id: searchFocusTimer
+    interval: 120
+    onTriggered: if (root.opened && serverSearch) serverSearch.forceActiveFocus()
   }
 
   KeyboardPanel {

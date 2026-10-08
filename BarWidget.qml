@@ -3,6 +3,7 @@ import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
+import "Model.js" as Model
 
 // Proton VPN bar widget entry point. Owns the data source (Service) and the
 // bar button; the details panel loads via Loader, matching the clock
@@ -72,6 +73,8 @@ BarWidget {
     function show() { root.open() }
     function hide() { root.close() }
     function toggle() { root.togglePanel() }
+    // Arms "open into search" for the next panel open; see Model.requestSearch.
+    function armSearch() { Model.requestSearch(Date.now()) }
     function status(): string { return vpn.statusText }
   }
 

@@ -8,6 +8,22 @@
 var _lastNotifiedTransition = { connected: false, at: 0 }
 var _notifyDedupeWindowMs = 45000
 
+// "Open straight into search" request from the hotkey. The hotkey arms it
+// over IPC, then summons the panel through the shell (which picks the
+// focused monitor); the panel that opens consumes it. Expires quickly so a
+// later plain click never lands in search.
+var _searchRequestAt = 0
+
+function requestSearch(now) {
+  _searchRequestAt = now
+}
+
+function consumeSearchRequest(now) {
+  var armed = _searchRequestAt > 0 && now - _searchRequestAt < 1500
+  _searchRequestAt = 0
+  return armed
+}
+
 function shouldNotifyTransition(connected, now) {
   if (_lastNotifiedTransition.connected === connected && now - _lastNotifiedTransition.at < _notifyDedupeWindowMs) return false
   _lastNotifiedTransition.connected = connected

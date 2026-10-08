@@ -83,6 +83,16 @@ The shell hot-reloads changes. Force discovery if needed:
 omarchy-shell shell rescanPlugins
 ```
 
+## Hotkey
+
+To toggle the panel and land straight in server search, bind both IPC calls
+(arm search, then let the shell open the panel on the focused monitor). In
+`~/.config/hypr/bindings.lua`:
+
+```lua
+o.bind("SUPER + CTRL + U", "Proton VPN search", "omarchy-shell -q tharin.protonvpn armSearch; omarchy-shell shell toggle tharin.protonvpn")
+```
+
 ## Settings
 
 | Key                  | Type    | Default | Meaning                        |
