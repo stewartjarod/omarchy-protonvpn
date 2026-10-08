@@ -23,7 +23,33 @@ in_tunnel() {
 
 in_tunnel && exec "$REAL" "$@"
 
-if ! ns_exists; then
+# qBittorrent is single-instance: a new launch just hands its arguments to the
+# running copy and exits. If that copy is outside the tunnel (real connection)
+# or in an old namespace (no network), quit it first so the new one, inside
+# the tunnel, is the one that stays.
+replace_stray_instance() {
+  local ns pid pns strays=()
+  ns=$(stat -Lc '%i' "/run/netns/$NS" 2>/dev/null) || return 0
+  for pid in $(pgrep -u "$(id -u)" -x qbittorrent); do
+    pns=$(stat -Lc '%i' "/proc/$pid/ns/net" 2>/dev/null) || continue
+    [[ "$pns" != "$ns" ]] && strays+=("$pid")
+  done
+  (( ${#strays[@]} )) || return 0
+  echo "qbittorrent: quitting the copy running outside the tunnel..." >&2
+  kill -TERM "${strays[@]}" 2>/dev/null
+  for _ in $(seq 1 60); do
+    local alive=0
+    for pid in "${strays[@]}"; do kill -0 "$pid" 2>/dev/null && alive=1; done
+    (( alive )) || return 0
+    sleep 0.5
+  done
+  echo "qbittorrent: it did not quit in 30s; not starting a second copy." >&2
+  exit 1
+}
+
+# The namespace outlives the tunnel, so check the live status the port-forward
+# loop publishes (up=1 only while the tunnel interface exists).
+if ! ns_exists || ! grep -qx 'up=1' "$RUN_DIR/status" 2>/dev/null; then
   msg="qBittorrent was NOT started: the torrent tunnel is not running.
 Start it from the Proton VPN panel, or: sudo systemctl start pvpn-torrent.service"
   echo "$msg" >&2
@@ -31,4 +57,5 @@ Start it from the Proton VPN panel, or: sudo systemctl start pvpn-torrent.servic
   exit 1
 fi
 
+replace_stray_instance
 exec sudo -n /usr/local/bin/pvpn-torrent-launch "$@"

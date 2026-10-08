@@ -39,23 +39,26 @@ if [[ -z "$ADDRESS" || -z "$PRIVKEY" || -z "$PEERKEY" || -z "$ENDPOINT" ]]; then
   exit 1
 fi
 
-# --- tear down any previous state (idempotent) ------------------------------
-if ns_exists; then
-  ip -n "$NS" link del "$WG_IF" 2>/dev/null || true
-  ip netns del "$NS" 2>/dev/null || true
-fi
-ip link del "$WG_IF" 2>/dev/null || true
-
 # --- namespace ---------------------------------------------------------------
-log "creating namespace $NS"
-ip netns add "$NS"
+# The namespace outlives tunnel restarts: only the WireGuard interface is
+# replaced. A qBittorrent running inside keeps its namespace, has no network
+# while the tunnel is down, and is back online as soon as it's up again.
+ip -n "$NS" link del "$WG_IF" 2>/dev/null || true
+ip link del "$WG_IF" 2>/dev/null || true
+if ! ns_exists; then
+  log "creating namespace $NS"
+  ip netns add "$NS"
+fi
 # A fresh namespace starts from kernel defaults, not the host sysctl; IPv6 off.
 ip netns exec "$NS" sysctl -qw net.ipv6.conf.all.disable_ipv6=1 net.ipv6.conf.default.disable_ipv6=1
 ip -n "$NS" link set lo up
 
 # Default-deny firewall inside the namespace, loaded before the tunnel moves
-# in: egress and ingress only via lo or the tunnel.
+# in: egress and ingress only via lo or the tunnel. Replaced atomically (the
+# add/delete/add pattern) so a reused namespace never runs without it.
 ip netns exec "$NS" nft -f - <<NFT
+table inet pvpntorguard
+delete table inet pvpntorguard
 table inet pvpntorguard {
     chain output {
         type filter hook output priority filter; policy drop;

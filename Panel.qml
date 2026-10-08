@@ -236,8 +236,8 @@ Panel {
     }
     var q = service.qbtState
     var qbtHint = q === "inside" ? "running in tunnel"
-      : q === "outside" ? "OUTSIDE tunnel \u2014 quit it"
-      : q === "stale" ? "old tunnel \u2014 restart it"
+      : q === "outside" ? "OUTSIDE tunnel \u2014 click to move"
+      : q === "stale" ? "no network \u2014 click to restart"
       : (service.torrentUp ? "open" : "tunnel off")
     rows.push({ action: "openQbt", label: "qBittorrent", hint: qbtHint })
     return rows

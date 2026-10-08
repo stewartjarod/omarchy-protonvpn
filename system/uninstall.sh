@@ -7,6 +7,7 @@ set -euo pipefail
 
 systemctl disable --now pvpn-torrent.service >/dev/null 2>&1 || true
 systemctl stop pvpn-torrent-portfwd.service >/dev/null 2>&1 || true
+[[ -x /usr/local/bin/pvpn-torrent-down ]] && /usr/local/bin/pvpn-torrent-down --purge || true
 rm -f /etc/systemd/system/pvpn-torrent.service /etc/systemd/system/pvpn-torrent-portfwd.service
 systemctl daemon-reload
 

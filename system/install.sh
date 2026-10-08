@@ -173,7 +173,13 @@ if [[ -r /etc/pvpn-torrent/wg.conf ]]; then
   sleep 2
   ip -n "$NS" -brief addr show "$WG_IF" || true
   say "Done. qBittorrent now only starts inside the tunnel (launcher, magnet links, \`qbittorrent\`)."
-  pgrep -u "$RUN_USER" -x qbittorrent >/dev/null && warn "qBittorrent is running OUTSIDE the tunnel right now - quit it and start it again."
+  ns_ino=$(stat -Lc '%i' "/run/netns/$NS" 2>/dev/null || true)
+  for pid in $(pgrep -u "$RUN_USER" -x qbittorrent); do
+    if [[ "$(stat -Lc '%i' "/proc/$pid/ns/net" 2>/dev/null)" != "$ns_ino" ]]; then
+      warn "qBittorrent is running OUTSIDE the tunnel - start it from the launcher or panel to move it in."
+      break
+    fi
+  done
 else
   say "Installed. Add a Proton WireGuard config to start the tunnel:"
   echo "    sudo $0 /path/to/proton-wireguard.conf"
