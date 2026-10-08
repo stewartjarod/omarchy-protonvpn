@@ -312,6 +312,10 @@ Panel {
       : !cr ? "run now"
       : !cr.done ? "could not run"
       : (cr.fail > 0 ? "! " + cr.fail + " failed" : "\u2713 " + cr.pass + " passed") + (cr.warn > 0 ? " \u00b7 " + cr.warn + " warning" + (cr.warn > 1 ? "s" : "") : "") + " \u00b7 " + Model.formatAgo(service.checkAt / 1000, Date.now())
+    if (!service.checkAvailable) {
+      rows.push({ action: "none", label: "Check for leaks", hint: "re-run system/install.sh to enable" })
+      return rows
+    }
     rows.push({ action: "runCheck", label: "Check for leaks", hint: checkHint })
     if (cr && cr.done) {
       for (var f = 0; f < cr.failures.length; f++) rows.push({ action: "none", label: "\u2717 " + cr.failures[f], hint: "" })

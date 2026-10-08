@@ -482,7 +482,7 @@ function parseTorrentStatus(text) {
 function parseQbtCheck(text) {
   var lines = String(text || "").split("\n")
   var head = lines[0] || ""
-  var r = { installed: /installed=1/.test(head), nsUp: /ns=1/.test(head),
+  var r = { installed: /installed=1/.test(head), nsUp: /ns=1/.test(head), checkAvailable: /check=1/.test(head),
             inside: 0, outside: 0, stale: 0, otherOutside: [] }
   for (var i = 1; i < lines.length; i++) {
     var m = /^(inside|outside|stale)\s+(\S+)/.exec(lines[i].trim())
@@ -652,13 +652,19 @@ function parseSections(text) {
 // proton0 is a wireguard link; OpenVPN shows up as a tun device, so match by
 // the Proton naming too. State must start with "connected" ("disconnected"
 // must not match).
+// Proton's kill switch adds NM dummy interfaces (pvpnksintrf0, pvpnrouteintrf0,
+// ipv6leakintrf0); they are never the tunnel. A WireGuard link wins over an
+// OpenVPN tun device.
 function parseVpnDevice(lines) {
+  var tun = null
   for (var i = 0; i < (lines || []).length; i++) {
     var p = lines[i].trim().split(":")
     if (p.length < 3 || !/^connected/.test(p[2])) continue
-    if (p[1] === "wireguard" || /^(proton|pvpn)/.test(p[0])) return { device: p[0], type: p[1] }
+    if (p[1] === "dummy" || /intrf\d+$/.test(p[0])) continue
+    if (p[1] === "wireguard") return { device: p[0], type: p[1] }
+    if (!tun && /^(proton|pvpn)/.test(p[0])) tun = { device: p[0], type: p[1] }
   }
-  return null
+  return tun
 }
 
 // First plain IPv4 default-route device from `ip route get 1.1.1.1`.

@@ -68,6 +68,8 @@ Item {
   property string _lastStatusStdout: ""
   property real _lastCliAt: 0
   property int _sharedRev: 0
+  property real _mismatchAt: 0
+  property int _mismatchTries: 0
   property real _rxChangedAt: 0
   property real _lastRx: -1
   property int _protectionTick: 0
@@ -210,7 +212,21 @@ Item {
     // Leader: decide whether the CLI needs to run.
     var interval = (panelOpen ? refreshIntervalSec : Math.max(300, refreshIntervalSec * 10)) * 1000
     var mismatch = (q.vpnDevice !== "") !== connected
-    if (!installed || !_stateKnown || mismatch || now - _lastCliAt >= interval) refresh(true)
+    // A lasting disagreement (CLI failing, an unusual tunnel device) must not
+    // turn into a CLI call every 5s: one immediate refresh, then back off
+    // 5s, 10s, 20s ... up to 60s until the two agree again.
+    var mismatchDue = false
+    if (mismatch) {
+      if (now >= _mismatchAt) {
+        mismatchDue = true
+        _mismatchAt = now + Math.min(60000, 5000 * Math.pow(2, _mismatchTries))
+        _mismatchTries++
+      }
+    } else {
+      _mismatchTries = 0
+      _mismatchAt = 0
+    }
+    if (!installed || !_stateKnown || mismatchDue || now - _lastCliAt >= interval) refresh(true)
     else Model.publishShared(_lastStatusStdout, text, now)
     maybeAlwaysOn()
   }
@@ -289,7 +305,9 @@ Item {
 
   function maybeAlwaysOn() {
     var now = Date.now()
-    if (!isLeader || !alwaysOn || connected || connecting || toggling || !_stateKnown) return
+    // The tunnel device is ground truth: a failed CLI status call must never
+    // fire a connect on top of a live tunnel.
+    if (!isLeader || !alwaysOn || connected || connecting || toggling || !_stateKnown || quick.vpnDevice !== "") return
     if (!Model.wantUp() || Model.actionBusy(now) || now < _aoNextAt) return
     _aoNextAt = now + 30000
     if (!_aoNotified) {
@@ -322,6 +340,8 @@ Item {
     if (settingBusy) return
     var next = Model.nextSettingValue(def, protonSettingValue(def))
     if (def.kind === "plugin") { setAlwaysOn(next === "on"); return }
+    // Don't edit Proton's settings file while a CLI command may be using it.
+    if (def.kind === "file" && (toggling || statusProcess.running || Model.actionBusy(Date.now()))) return
     settingBusy = true
     _settingKey = def.key
     _settingValue = next
@@ -338,6 +358,7 @@ Item {
   property string _settingValue: ""
 
   // ---- torrent tunnel leak check (read-only root helper) ----
+  property bool checkAvailable: false
   property bool checkRunning: false
   property var checkResult: null
   property real checkAt: 0
@@ -381,6 +402,7 @@ Item {
     torrentInstalled = r.installed
     _torrentNs = r.nsUp
     otherOutside = r.otherOutside
+    checkAvailable = r.checkAvailable
     qbtState = r.outside > 0 ? "outside" : (r.stale > 0 ? "stale" : (r.inside > 0 ? "inside" : "none"))
   }
 
@@ -587,7 +609,7 @@ Item {
   Process {
     id: qbtCheckProcess
     // installed/ns header, then where each qBittorrent process lives.
-    command: ["sh", "-c", "i=0; [ -x /usr/local/bin/pvpn-torrent-launch ] && i=1; n=0; [ -e /run/netns/pvpntor ] && n=1; echo \"installed=$i ns=$n\"; ns=$(stat -Lc %i /run/netns/pvpntor 2>/dev/null); me=$(stat -Lc %i /proc/self/ns/net); for a in qbittorrent qbittorrent-nox transmission-daemon transmission-gtk transmission-qt deluged deluge deluge-gtk rtorrent ktorrent aria2c; do for p in $(pgrep -u \"$(id -u)\" -x \"$a\"); do x=$(stat -Lc %i /proc/$p/ns/net 2>/dev/null) || continue; if [ -n \"$ns\" ] && [ \"$x\" = \"$ns\" ]; then echo \"inside $a\"; elif [ \"$x\" = \"$me\" ]; then echo \"outside $a\"; else echo \"stale $a\"; fi; done; done; for s in transmission transmission-daemon deluged qbittorrent-nox rtorrent; do systemctl is-active --quiet $s.service 2>/dev/null && echo \"outside $s.service\"; done; true"]
+    command: ["sh", "-c", "i=0; [ -x /usr/local/bin/pvpn-torrent-launch ] && i=1; n=0; [ -e /run/netns/pvpntor ] && n=1; c=0; [ -x /usr/local/bin/pvpn-torrent-check ] && c=1; echo \"installed=$i ns=$n check=$c\"; ns=$(stat -Lc %i /run/netns/pvpntor 2>/dev/null); me=$(stat -Lc %i /proc/self/ns/net); for a in qbittorrent qbittorrent-nox transmission-daemon transmission-gtk transmission-qt deluged deluge deluge-gtk rtorrent ktorrent aria2c; do for p in $(pgrep -u \"$(id -u)\" -x \"$a\"); do x=$(stat -Lc %i /proc/$p/ns/net 2>/dev/null) || continue; if [ -n \"$ns\" ] && [ \"$x\" = \"$ns\" ]; then echo \"inside $a\"; elif [ \"$x\" = \"$me\" ]; then echo \"outside $a\"; else echo \"stale $a\"; fi; done; done; for s in transmission transmission-daemon deluged qbittorrent-nox rtorrent; do systemctl is-active --quiet $s.service 2>/dev/null && echo \"outside $s.service\"; done; true"]
     stdout: StdioCollector { id: qbtCheckStdout; waitForEnd: true }
     onExited: root.applyQbtCheck(String(qbtCheckStdout.text || ""))
   }
@@ -641,9 +663,7 @@ Item {
       root.checkResult = r
       root.checkAt = Date.now()
       root.checkRunning = false
-      if (!r.done) {
-        root.lastError = "Leak check could not run (is the system part installed?)"
-      } else if (r.fail > 0) {
+      if (r.done && r.fail > 0) {
         root.notify("Torrent tunnel check failed", r.failures[0] + (r.fail > 1 ? " (+" + (r.fail - 1) + " more)" : ""), true)
       }
     }
