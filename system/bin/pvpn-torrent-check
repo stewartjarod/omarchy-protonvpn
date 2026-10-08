@@ -71,8 +71,10 @@ else
 fi
 
 # --- exit address: namespace must leave from a different IP than the host ----
-ns_ip=$(nsx curl -s --max-time 8 https://ifconfig.me/ip 2>/dev/null)
-host_ip=$(curl -s --max-time 8 https://ifconfig.me/ip 2>/dev/null)
+# IPv4 on both sides: the host may have native IPv6, which would make the
+# comparison meaningless (the namespace has IPv6 disabled).
+ns_ip=$(nsx curl -4 -s --max-time 8 https://ifconfig.me/ip 2>/dev/null)
+host_ip=$(curl -4 -s --max-time 8 https://ifconfig.me/ip 2>/dev/null)
 if [[ -z "$ns_ip" ]]; then
   bad "no connectivity through the tunnel (could not fetch the exit address)"
 elif [[ -n "$host_ip" && "$ns_ip" == "$host_ip" ]]; then
