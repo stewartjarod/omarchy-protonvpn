@@ -34,6 +34,8 @@ Item {
   property string serverFilter: "all"
   property var _parsedList: null
   signal filterChanged()
+  // Fires once a requested connection is confirmed by a status poll.
+  signal connectSucceeded()
   property bool refreshing: false
   property bool toggling: false
   // True from a connect request until the CLI returns; drives the bar's
@@ -178,7 +180,10 @@ Item {
     // Once the real state matches the optimistic value, drop back to tracking
     // reality so the knob always reflects the true connection.
     if (_desiredConnected !== -1 && connected === (_desiredConnected === 1)) _desiredConnected = -1
-    if (connecting && !toggling) connecting = false
+    if (connecting && !toggling) {
+      connecting = false
+      if (connected) connectSucceeded()
+    }
     serverName = parsed.serverName
     serverCity = parsed.serverCity
     serverCountry = parsed.serverCountry

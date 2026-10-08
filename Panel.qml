@@ -119,6 +119,7 @@ Panel {
     target: root.service
     ignoreUnknownSignals: true
     function onFilterChanged() { root.expandedCountry = ""; root.expandedCity = "" }
+    function onConnectSucceeded() { root.showTunnel() }
   }
 
   readonly property bool headerHasCursor: cursorActive && focusSection === "header"
@@ -307,6 +308,21 @@ Panel {
       expandedCity = same ? "" : value.city
     }
     else if (action === "cycleFilter") service.cycleServerFilter()
+  }
+
+  // After connecting, clear the search and fold the server list away so the
+  // tunnel details are what's on screen.
+  function showTunnel() {
+    if (!opened) return
+    searchQuery = ""
+    expandedCountry = ""
+    expandedCity = ""
+    serversExpanded = false
+    cursorActive = false
+    focusSection = "header"
+    selectedIndex = 0
+    if (serverSearch && serverSearch.activeFocus) keyCatcher.forceActiveFocus()
+    if (panelFlick) panelFlick.contentY = 0
   }
 
   function toggleServers() {
