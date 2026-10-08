@@ -15,6 +15,9 @@ Item {
   property bool connected: false
   property bool connecting: false
   property bool warning: false
+  // Torrent tunnel up: small download-arrow badge in the top-right corner.
+  property bool torrentOn: false
+  property color torrentColor: Color.accent
   property real disconnectedOpacity: 0.4
 
   width: iconSize
@@ -83,6 +86,26 @@ Item {
         fillColor: Qt.rgba(root.color.r, root.color.g, root.color.b, root.dotOpacity(2))
         PathSvg { path: "m 13 6 c -1.105469 0 -2 0.894531 -2 2 s 0.894531 2 2 2 s 2 -0.894531 2 -2 s -0.894531 -2 -2 -2 z" }
       }
+    }
+  }
+
+  Rectangle {
+    visible: root.torrentOn
+    width: Math.max(7, parent.width * 0.46)
+    height: width
+    radius: width / 2
+    color: root.torrentColor
+    anchors.right: parent.right
+    anchors.top: parent.top
+    anchors.rightMargin: -width * 0.25
+    anchors.topMargin: -width * 0.2
+
+    Text {
+      anchors.centerIn: parent
+      text: "\u2193"
+      color: Color.background
+      font.pixelSize: Math.max(6, parent.height * 0.8)
+      font.bold: true
     }
   }
 

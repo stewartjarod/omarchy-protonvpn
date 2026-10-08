@@ -30,7 +30,9 @@ Panel {
   readonly property color selectedFill: bar ? Style.selectedFillFor(bar.foreground, Color.accent) : "transparent"
 
   readonly property bool hasError: service && service.lastError !== ""
-  readonly property string heroMeta: service ? (service.connected ? "Connected" : "Disconnected") : "Proton VPN"
+  readonly property string heroMeta: service
+    ? (service.connected ? "Connected" : "Disconnected") + (service.torrentUp ? " \u00b7 torrents on" : "")
+    : "Proton VPN"
   readonly property bool vpnOn: service && service.connected
   // Connected: the server. Disconnected: where the switch / enter will go.
   readonly property string heroDetail: {
@@ -495,12 +497,14 @@ Panel {
               fontFamily: root.fontFamily
               iconOpacity: root.vpnOn ? 1.0 : 0.5
               iconComponent: Component {
-                ProtonIcon {
+                VpnIcon {
                   iconSize: Style.font.display
-                  color: root.vpnOn ? root.foreground : root.dim
+                  color: root.foreground
+                  connected: root.vpnOn
+                  connecting: root.service ? root.service.connecting : false
+                  torrentOn: root.service ? root.service.torrentUp : false
                   badgeColor: root.urgent
-                  crossed: !root.vpnOn
-                  warning: root.hasError
+                  warning: root.hasError || (root.service && root.service.torrentLeak)
                 }
               }
               trailingControl: Component {
