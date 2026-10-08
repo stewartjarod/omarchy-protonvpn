@@ -106,7 +106,7 @@ function parseCountriesOutput(text) {
 // Projects Proton's cached logical server list into a compact country list.
 // Tier 0 is Proton's Free tier; offline logical servers are omitted.
 function freeCountryRows(raw, countryNames) {
-  return (serverListRows(raw, countryNames).free) || []
+  return serverListRows(parseServerList(raw), countryNames).free || []
 }
 
 // Proton's `Features` bitmask on a logical server.
@@ -136,33 +136,86 @@ function hasFeature(server, bit) {
   return (Number(server.Features) & bit) !== 0
 }
 
-// Parses the cached server list once and projects it into one country list
-// per server-type filter. Only servers the account's plan can reach
-// (Tier <= MaxTier from the same file) are listed, except Free which is
-// always tier 0.
-function serverListRows(raw, countryNames) {
-  var out = {}
-  var parsed
+// Parses the cached server list once. Callers keep the result and project it
+// per filter / country / city on demand.
+function parseServerList(raw) {
   try {
-    parsed = JSON.parse(String(raw || ""))
+    var parsed = JSON.parse(String(raw || ""))
+    var maxTier = Number(parsed.MaxTier)
+    return { logicals: parsed.LogicalServers || [], maxTier: isFinite(maxTier) ? maxTier : 0 }
   } catch (e) {
-    return out
+    return null
   }
-  var logicals = parsed.LogicalServers || []
-  var maxTier = Number(parsed.MaxTier)
-  if (!isFinite(maxTier)) maxTier = 0
+}
+
+// Only servers the account's plan can reach (Tier <= MaxTier) match, except
+// Free which is always tier 0.
+function filterPredicate(key, maxTier) {
   var reachable = function(s) { return Number(s.Tier) <= maxTier }
-  var preds = {
-    all: reachable,
-    free: function(s) { return Number(s.Tier) === 0 },
-    plus: function(s) { return Number(s.Tier) >= 1 && reachable(s) },
-    p2p: function(s) { return reachable(s) && hasFeature(s, FEATURE_P2P) },
-    streaming: function(s) { return reachable(s) && hasFeature(s, FEATURE_STREAMING) },
-    securecore: function(s) { return reachable(s) && hasFeature(s, FEATURE_SECURE_CORE) },
-    tor: function(s) { return reachable(s) && hasFeature(s, FEATURE_TOR) }
+  switch (key) {
+    case "free": return function(s) { return Number(s.Tier) === 0 }
+    case "plus": return function(s) { return Number(s.Tier) >= 1 && reachable(s) }
+    case "p2p": return function(s) { return reachable(s) && hasFeature(s, FEATURE_P2P) }
+    case "streaming": return function(s) { return reachable(s) && hasFeature(s, FEATURE_STREAMING) }
+    case "securecore": return function(s) { return reachable(s) && hasFeature(s, FEATURE_SECURE_CORE) }
+    case "tor": return function(s) { return reachable(s) && hasFeature(s, FEATURE_TOR) }
+    default: return reachable
   }
-  for (var key in preds) out[key] = countryRowsWhere(logicals, countryNames, preds[key], key !== "free")
+}
+
+// One country list per server-type filter.
+function serverListRows(parsed, countryNames) {
+  var out = {}
+  if (!parsed) return out
+  for (var i = 0; i < SERVER_FILTERS.length; i++) {
+    var key = SERVER_FILTERS[i].key
+    out[key] = countryRowsWhere(parsed.logicals, countryNames, filterPredicate(key, parsed.maxTier), key !== "free")
+  }
   return out
+}
+
+// Cities inside one country for a filter, as rows of { name, count, bestLoad, hint }.
+function cityRows(parsed, filterKey, country) {
+  if (!parsed) return []
+  var pred = filterPredicate(filterKey, parsed.maxTier)
+  var byCity = {}
+  for (var i = 0; i < parsed.logicals.length; i++) {
+    var s = parsed.logicals[i]
+    if (!s || Number(s.Status) !== 1 || String(s.ExitCountry || "").toUpperCase() !== country || !pred(s)) continue
+    var name = stripMarkup(s.City || "Other")
+    var load = Number(s.Load)
+    if (!byCity[name]) byCity[name] = { name: name, count: 0, bestLoad: load }
+    byCity[name].count += 1
+    if (isFinite(load) && load < byCity[name].bestLoad) byCity[name].bestLoad = load
+  }
+  var rows = []
+  for (var n in byCity) {
+    var r = byCity[n]
+    r.hint = r.count + " server" + (r.count === 1 ? "" : "s") + " \u00b7 " + r.bestLoad + "% best load"
+    rows.push(r)
+  }
+  rows.sort(function(a, b) { return a.name.localeCompare(b.name) })
+  return rows
+}
+
+// Individual servers in a country (and city) for a filter, lowest load first.
+function serverRowsIn(parsed, filterKey, country, city) {
+  if (!parsed) return []
+  var pred = filterPredicate(filterKey, parsed.maxTier)
+  var rows = []
+  for (var i = 0; i < parsed.logicals.length; i++) {
+    var s = parsed.logicals[i]
+    if (!s || Number(s.Status) !== 1 || String(s.ExitCountry || "").toUpperCase() !== country || !pred(s)) continue
+    if (stripMarkup(s.City || "Other") !== city) continue
+    var feats = []
+    if (hasFeature(s, FEATURE_P2P)) feats.push("P2P")
+    if (hasFeature(s, FEATURE_STREAMING)) feats.push("Streaming")
+    if (hasFeature(s, FEATURE_SECURE_CORE)) feats.push("Secure Core")
+    if (hasFeature(s, FEATURE_TOR)) feats.push("Tor")
+    rows.push({ name: stripMarkup(s.Name), load: Number(s.Load), hint: s.Load + "%" + (feats.length ? " \u00b7 " + feats.join(", ") : "") })
+  }
+  rows.sort(function(a, b) { return a.load - b.load })
+  return rows
 }
 
 function countryRowsWhere(logicals, countryNames, predicate, sortByName) {

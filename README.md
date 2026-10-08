@@ -16,8 +16,10 @@ Status and one-click fastest-server connection for Proton VPN in the menu bar.
   - Collapsible server list with a type filter (click the header or press `s`;
     press `f` or click the "Type" row to cycle): All, Free, Plus, P2P,
     Streaming, Secure Core, Tor. Types your plan can't use are hidden.
-  - Click a country to connect to its fastest server of the selected type;
-    P2P, Secure Core and Tor also get a "Fastest ... server" row
+  - Click a country to expand its cities, and a city to expand its servers
+    (lowest load first). Each level has a "Fastest in ..." row, and picking a
+    server connects to that exact one. P2P, Secure Core and Tor also get a
+    "Fastest ... server" row at the top
   - Refresh action
 - Desktop notifications when the VPN connects, disconnects, or a command fails
   (goes through the shell's notification daemon, so do-not-disturb applies).

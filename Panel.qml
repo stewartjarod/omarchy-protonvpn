@@ -48,11 +48,19 @@ Panel {
   property int selectedIndex: 0
   property bool cursorActive: false
   property bool serversExpanded: false
+  property string expandedCountry: ""
+  property string expandedCity: ""
   readonly property string filterLabel: {
     if (!service) return ""
     var list = Model.SERVER_FILTERS
     for (var i = 0; i < list.length; i++) if (list[i].key === service.serverFilter) return list[i].label
     return ""
+  }
+
+  Connections {
+    target: root.service
+    ignoreUnknownSignals: true
+    function onFilterChanged() { root.expandedCountry = ""; root.expandedCity = "" }
   }
 
   readonly property bool headerHasCursor: cursorActive && focusSection === "header"
@@ -73,8 +81,26 @@ Panel {
       var anyOk = service.serverFilter !== "free" && service.serverFilter !== "plus" && service.serverFilter !== "streaming"
       countries.push({ action: "cycleFilter", value: "", label: "Type", hint: root.filterLabel + "  \u00b7  change" })
       if (anyOk) countries.push({ action: "connectServer", value: "", label: "Fastest " + root.filterLabel + " server", hint: "any country" })
-      for (var i = 0; i < rows.length; i++)
-        countries.push({ action: "connectServer", value: rows[i].code, label: rows[i].name, hint: rows[i].hint })
+      var ind1 = "\u2003"
+      var ind2 = "\u2003\u2003"
+      for (var i = 0; i < rows.length; i++) {
+        var row = rows[i]
+        var openCountry = expandedCountry === row.code
+        countries.push({ action: "toggleCountry", value: row.code, label: (openCountry ? "\u25be " : "\u25b8 ") + row.name, hint: row.hint })
+        if (!openCountry) continue
+        countries.push({ action: "connectServer", value: row.code, label: ind1 + "Fastest in " + row.name, hint: "" })
+        var cities = service.cityRows(row.code)
+        for (var j = 0; j < cities.length; j++) {
+          var city = cities[j]
+          var openCity = expandedCity === city.name
+          countries.push({ action: "toggleCity", value: city.name, label: ind1 + (openCity ? "\u25be " : "\u25b8 ") + city.name, hint: city.hint })
+          if (!openCity) continue
+          countries.push({ action: "connectCity", value: city.name, label: ind2 + "Fastest in " + city.name, hint: "" })
+          var servers = service.serverRowsIn(row.code, city.name)
+          for (var k = 0; k < servers.length; k++)
+            countries.push({ action: "connectName", value: servers[k].name, label: ind2 + servers[k].name, hint: servers[k].hint })
+        }
+      }
     }
     actions.push({ action: "refresh", label: "Refresh", hint: "" })
     return { info: info, countries: countries, actions: actions }
@@ -134,7 +160,11 @@ Panel {
     if (action === "refresh") { service.refresh(); service.refreshServerList() }
     else if (action === "copyIp") service.copyText(service.tunnelIp)
     else if (action === "copyServer") service.copyText(serverLabel)
-    else if (action === "connectServer") service.connectServer(value)
+    else if (action === "connectServer") service.connectServer(value, "", "")
+    else if (action === "connectCity") service.connectServer(expandedCountry, value, "")
+    else if (action === "connectName") service.connectServer("", "", value)
+    else if (action === "toggleCountry") { expandedCity = ""; expandedCountry = expandedCountry === value ? "" : value }
+    else if (action === "toggleCity") expandedCity = expandedCity === value ? "" : value
     else if (action === "cycleFilter") service.cycleServerFilter()
   }
 
@@ -155,6 +185,8 @@ Panel {
       selectedIndex = 0
       cursorActive = false
       serversExpanded = false
+      expandedCountry = ""
+      expandedCity = ""
       if (service) service.refreshServerList()
     }
   }

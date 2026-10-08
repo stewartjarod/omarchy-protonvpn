@@ -32,6 +32,8 @@ Item {
   property var freeCountries: []
   property var serverRows: ({})
   property string serverFilter: "all"
+  property var _parsedList: null
+  signal filterChanged()
   property bool refreshing: false
   property bool toggling: false
 
@@ -113,23 +115,32 @@ Item {
   }
 
   function applyServerList() {
-    var rows = Model.serverListRows(_serverListText, _countryNames)
+    _parsedList = Model.parseServerList(_serverListText)
+    var rows = Model.serverListRows(_parsedList, _countryNames)
     freeCountries = rows.free || []
     serverRows = rows
   }
 
-  // Connects to the fastest server in `code` (any country when empty) that
-  // matches the active server-type filter, using the CLI's feature flags
-  // where they exist (--p2p / --securecore / --tor).
-  function connectServer(code) {
+  function cityRows(country) { return Model.cityRows(_parsedList, serverFilter, country) }
+  function serverRowsIn(country, city) { return Model.serverRowsIn(_parsedList, serverFilter, country, city) }
+
+  // Connects to the fastest server matching the active type filter, narrowed
+  // by country and/or city, using the CLI's feature flags where they exist
+  // (--p2p / --securecore / --tor). `name` connects to one specific server.
+  function connectServer(code, city, name) {
     if (toggling) return
-    var flag = Model.filterFlag(serverFilter)
     var args = ["protonvpn", "connect"]
-    if (flag !== "") args.push(flag)
-    if (code) args.push("--country", String(code))
+    var flag = Model.filterFlag(serverFilter)
+    if (name) {
+      args.push(String(name))
+    } else {
+      if (flag !== "") args.push(flag)
+      if (city && city !== "Other") args.push("--city", String(city))
+      else if (code) args.push("--country", String(code))
+    }
     toggling = true
     lastError = ""
-    actionStatus = "Connecting to fastest " + (flag !== "" ? serverFilter + " " : "") + "server" + (code ? " in " + code : "") + "\u2026"
+    actionStatus = "Connecting to " + (name ? name : "fastest " + (flag !== "" ? serverFilter + " " : "") + "server" + (city ? " in " + city : (code ? " in " + code : ""))) + "\u2026"
     toggleProcess.command = args
     toggleProcess.running = true
   }
@@ -142,7 +153,7 @@ Item {
     for (var step = 1; step <= list.length; step++) {
       var next = list[(idx + step) % list.length]
       var rows = serverRows[next.key]
-      if (next.key === "all" || (rows && rows.length > 0)) { serverFilter = next.key; return }
+      if (next.key === "all" || (rows && rows.length > 0)) { serverFilter = next.key; filterChanged(); return }
     }
   }
 
