@@ -172,7 +172,7 @@ Panel {
     serversExpanded = !serversExpanded
   }
 
-  onFreeServersExpandedChanged: clampSelection()
+  onServersExpandedChanged: clampSelection()
 
   function clampSelection() {
     if (focusSection === "rows" && selectedIndex >= cursorRowCount)
