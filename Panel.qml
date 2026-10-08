@@ -31,7 +31,8 @@ Panel {
 
   readonly property bool hasError: service && service.lastError !== ""
   readonly property string heroMeta: service
-    ? (service.connected ? "Connected" : "Disconnected") + (service.torrentUp ? " \u00b7 torrents on" : "")
+    ? (service.connected ? "Connected" : "Disconnected")
+      + (service.torrentState === "ok" ? " \u00b7 torrents on" : service.torrentState === "error" ? " \u00b7 torrent problem" : "")
     : "Proton VPN"
   readonly property bool vpnOn: service && service.connected
   // Connected: the server. Disconnected: where the switch / enter will go.
@@ -228,6 +229,9 @@ Panel {
     var st = service.torrentStatus || {}
     var server = st.server || ""
     var tunnelHint = service.torrentBusy ? "\u2026" : (service.torrentUp ? "On" + (server ? " \u00b7 " + server : "") : "Off")
+    var health = service.torrentHealth || {}
+    if (health.state === "ok") rows.push({ action: "none", label: "Status", hint: "\u2713 working" })
+    else if (health.state === "error") rows.push({ action: "none", label: "Status", hint: "! " + health.short })
     rows.push({ action: "toggleTorrent", label: "Torrent tunnel", hint: tunnelHint })
     if (service.torrentUp) {
       var portHint = st.port_ok === "1" && st.port
@@ -502,9 +506,9 @@ Panel {
                   color: root.foreground
                   connected: root.vpnOn
                   connecting: root.service ? root.service.connecting : false
-                  torrentOn: root.service ? root.service.torrentUp : false
+                  torrentState: root.service ? root.service.torrentState : "off"
                   badgeColor: root.urgent
-                  warning: root.hasError || (root.service && root.service.torrentLeak)
+                  warning: root.hasError
                 }
               }
               trailingControl: Component {

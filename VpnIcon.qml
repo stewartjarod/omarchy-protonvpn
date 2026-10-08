@@ -15,8 +15,9 @@ Item {
   property bool connected: false
   property bool connecting: false
   property bool warning: false
-  // Torrent tunnel up: small download-arrow badge in the top-right corner.
-  property bool torrentOn: false
+  // Torrent tunnel health badge, top-right: "ok" = accent download arrow,
+  // "error" = urgent "!", "off" = none.
+  property string torrentState: "off"
   property color torrentColor: Color.accent
   property real disconnectedOpacity: 0.4
 
@@ -90,11 +91,11 @@ Item {
   }
 
   Rectangle {
-    visible: root.torrentOn
+    visible: root.torrentState === "ok" || root.torrentState === "error"
     width: Math.max(7, parent.width * 0.46)
     height: width
     radius: width / 2
-    color: root.torrentColor
+    color: root.torrentState === "error" ? root.badgeColor : root.torrentColor
     anchors.right: parent.right
     anchors.top: parent.top
     anchors.rightMargin: -width * 0.25
@@ -102,7 +103,7 @@ Item {
 
     Text {
       anchors.centerIn: parent
-      text: "\u2193"
+      text: root.torrentState === "error" ? "!" : "\u2193"
       color: Color.background
       font.pixelSize: Math.max(6, parent.height * 0.8)
       font.bold: true

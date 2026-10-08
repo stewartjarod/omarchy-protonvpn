@@ -72,7 +72,18 @@ Item {
   // old namespace after a tunnel restart: no network until restarted)
   property string qbtState: "none"
   readonly property bool torrentLeak: qbtState === "outside" && torrentInstalled
-  property bool _leakNotified: false
+  // Re-evaluated whenever the status file (every 15s) or the qBittorrent
+  // check (every 10s) updates; see Model.torrentHealth.
+  // _healthTick (bumped every 10s) makes the handshake age re-evaluate even if
+  // the status file stops updating.
+  property int _healthTick: 0
+  readonly property var torrentHealth: { _healthTick; return Model.torrentHealth(torrentInstalled, torrentUp, qbtState, torrentStatus, Date.now()) }
+  readonly property string torrentState: torrentHealth.state
+  onTorrentStateChanged: {
+    if (torrentState === "error" && Model.shouldNotifyTorrent("error:" + torrentHealth.reason, Date.now()))
+      notify("Torrent tunnel problem", torrentHealth.reason, true)
+    else if (torrentState !== "error") Model.shouldNotifyTorrent(torrentState, Date.now())
+  }
 
   readonly property int refreshIntervalSec: intSetting("refreshIntervalSec", 30, 5, 3600)
   readonly property bool notificationsEnabled: boolSetting("notificationsEnabled", true)
@@ -143,6 +154,7 @@ Item {
   }
 
   function refreshTorrent() {
+    _healthTick++
     if (qbtCheckProcess.running) return
     qbtCheckProcess.running = true
     torrentStatusFile.reload()
@@ -168,12 +180,6 @@ Item {
     torrentInstalled = r.installed
     _torrentNs = r.nsUp
     qbtState = r.outside > 0 ? "outside" : (r.stale > 0 ? "stale" : (r.inside > 0 ? "inside" : "none"))
-    if (torrentLeak && !_leakNotified) {
-      _leakNotified = true
-      notify("qBittorrent is outside the torrent tunnel", "It is using your real connection. Quit it and start it from the Proton VPN panel.", true)
-    } else if (!torrentLeak) {
-      _leakNotified = false
-    }
   }
 
   function refreshServerList() {

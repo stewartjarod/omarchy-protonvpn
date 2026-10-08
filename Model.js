@@ -52,6 +52,32 @@ function usStateCode(server) {
   return m && US_STATES[m[1]] ? m[1] : ""
 }
 
+// Shared across the per-monitor Service instances so a torrent problem
+// notifies once, not once per bar.
+var _torrentNotified = { state: "", at: 0 }
+
+function shouldNotifyTorrent(state, now) {
+  if (_torrentNotified.state === state && now - _torrentNotified.at < 600000) return false
+  _torrentNotified.state = state
+  _torrentNotified.at = now
+  return true
+}
+
+// Torrent tunnel health for the icons: "off" | "ok" | "error", plus why.
+//   error: qBittorrent outside the tunnel (real connection, even with the
+//   tunnel off), stuck in an old namespace, or the tunnel up but with no
+//   WireGuard handshake for 3+ minutes (not passing traffic).
+function torrentHealth(installed, up, qbtState, status, nowMs) {
+  if (!installed) return { state: "off", reason: "" }
+  if (qbtState === "outside") return { state: "error", short: "qBittorrent outside tunnel", reason: "qBittorrent is outside the tunnel, on your real connection" }
+  if (!up) return { state: "off", reason: "" }
+  if (qbtState === "stale") return { state: "error", short: "qBittorrent has no network", reason: "qBittorrent is in an old tunnel with no network" }
+  var hs = Number(status && status.handshake)
+  if (!isFinite(hs) || hs <= 0 || nowMs / 1000 - hs > 180)
+    return { state: "error", short: "no handshake (3m+)", reason: "The torrent tunnel has had no handshake for 3+ minutes" }
+  return { state: "ok", short: "", reason: "" }
+}
+
 function shouldNotifyTransition(connected, now) {
   if (_lastNotifiedTransition.connected === connected && now - _lastNotifiedTransition.at < _notifyDedupeWindowMs) return false
   _lastNotifiedTransition.connected = connected

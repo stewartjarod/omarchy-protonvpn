@@ -19,7 +19,7 @@ BarWidget {
 
   readonly property bool vpnConnected: vpn.connected
   readonly property bool vpnBusy: vpn.busy
-  readonly property bool vpnWarning: vpn.lastError !== "" || vpn.torrentLeak
+  readonly property bool vpnWarning: vpn.lastError !== ""
 
   // ---- Panel lifecycle, forwarded for shell.summon/hide/toggle routing.
   //      Bar.findPanelWidget requires open/close/opened on the bar-widget root.
@@ -92,6 +92,7 @@ BarWidget {
           connected: root.vpnConnected
           connecting: vpn.connecting
           warning: root.vpnWarning
+          torrentState: vpn.torrentState
           badgeColor: root.bar ? root.bar.urgent : Color.urgent
         }
       }
